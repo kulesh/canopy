@@ -12,11 +12,15 @@ pub use coverage::{parse_lcov, CoverageMap, CoverageStats};
 pub use git::{
     blame_for_file, collect_git_signals, compare_branches, BranchDiffSummary, GitSignals,
 };
-pub use llm::{provider_from_env, LlmCompletion, LlmProvider, ModelInfo, ProviderSelection};
+pub use llm::{
+    provider_from_env, CompletionRequest, LlmCompletion, LlmProvider, ModelInfo, PromptTask,
+    ProviderSelection, ResponseFormat,
+};
 pub use mapping_policy::{
-    collect_source_tree_snapshot, is_source_file, normalize_path, parse_policy_response,
-    policy_index, read_purpose_file, validate_policy, C4MappingPolicy, FileMappingRule,
-    SourceTreeSnapshot,
+    collect_source_tree_snapshot, contributions_by_file, is_source_file, normalize_path,
+    parse_policy_response, policy_index, read_purpose_file, validate_policy,
+    validate_policy_evidence, C4MappingPolicy, ComponentContribution, EvidenceSpan,
+    FileMappingRule, FileSemanticAst, SemanticAstNode, SourceTreeSnapshot,
 };
 pub use persistence::PersistenceStore;
 pub use repo_discovery::{

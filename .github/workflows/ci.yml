@@ -12,28 +12,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup mise
+        uses: jdx/mise-action@v2
+
+      - name: Install tools via mise
+        run: mise install
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
       - name: Format check
-        run: cargo fmt --all -- --check
+        run: mise exec -- cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: mise exec -- cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Tests (nextest)
-        run: cargo nextest run --workspace
+        run: mise exec -- cargo nextest run --workspace
+
+      - name: Tests (workspace)
+        run: mise exec -- cargo test --workspace
 
       - name: Doctests
-        run: cargo test --workspace --doc
+        run: mise exec -- cargo test --workspace --doc
+
+      - name: Bench compile
+        run: mise exec -- cargo bench -p canopy-lib --no-run
 
       - name: Build
-        run: cargo build --workspace
+        run: mise exec -- cargo build --workspace

@@ -5,9 +5,9 @@ use tracing::warn;
 use crate::domain::graph::ProvenanceSource;
 use crate::domain::{ArchitectureGraph, NodeKind};
 use crate::error::Result;
-use crate::infrastructure::{InferenceCache, LlmProvider};
+use crate::infrastructure::{CompletionRequest, InferenceCache, LlmProvider};
 
-use super::prompt::node_summary_prompt;
+use super::prompt::node_summary_request;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InferenceStats {
@@ -42,14 +42,20 @@ pub enum InferenceProgress {
 pub struct InferenceEngine {
     provider: Option<Box<dyn LlmProvider>>,
     cache: InferenceCache,
+    purpose: String,
     pub stats: InferenceStats,
 }
 
 impl InferenceEngine {
-    pub fn new(provider: Option<Box<dyn LlmProvider>>, cache: InferenceCache) -> Self {
+    pub fn new(
+        provider: Option<Box<dyn LlmProvider>>,
+        cache: InferenceCache,
+        purpose: String,
+    ) -> Self {
         Self {
             provider,
             cache,
+            purpose,
             stats: InferenceStats::default(),
         }
     }
@@ -96,11 +102,11 @@ impl InferenceEngine {
                 continue;
             }
 
-            let prompt = node_summary_prompt(graph, &node_snapshot);
+            let request = node_summary_request(graph, &node_snapshot, &self.purpose);
             let cache_key = format!(
                 "{repo_hash}:{}:{}",
                 node_snapshot.id,
-                digest_prompt(&prompt)
+                digest_request(&request)
             );
 
             let (summary, confidence, prompt_tokens, completion_tokens, source) = if let Some(
@@ -114,7 +120,7 @@ impl InferenceEngine {
                 self.stats.cache_misses += 1;
                 if provider_available {
                     if let Some(provider) = &self.provider {
-                        match provider.complete(&prompt).await {
+                        match provider.complete(&request).await {
                             Ok(completion) => {
                                 self.cache.set(&cache_key, &completion.text)?;
                                 (
@@ -192,13 +198,13 @@ impl InferenceEngine {
         node_id: &str,
     ) -> Option<(String, f32, &'static str)> {
         let node = graph.node(node_id)?;
-        let prompt = node_summary_prompt(graph, node);
+        let request = node_summary_request(graph, node, &self.purpose);
         if let Some(provider) = &self.provider {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
             if let Ok(rt) = runtime {
-                if let Ok(completion) = rt.block_on(provider.complete(&prompt)) {
+                if let Ok(completion) = rt.block_on(provider.complete(&request)) {
                     return Some((completion.text, 0.86, "provider"));
                 }
             }
@@ -228,12 +234,31 @@ fn local_summary(node: &crate::domain::ArchitectureNode, graph: &ArchitectureGra
     }
 }
 
-fn digest_prompt(prompt: &str) -> u64 {
+fn digest_request(request: &CompletionRequest) -> u64 {
     let mut hash: u64 = 1469598103934665603;
-    for b in prompt.as_bytes() {
+    for b in request.system_prompt.as_bytes() {
         hash ^= *b as u64;
         hash = hash.wrapping_mul(1099511628211);
     }
+    for b in request.user_prompt.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash ^= match request.task {
+        crate::infrastructure::PromptTask::MappingPolicy => 1,
+        crate::infrastructure::PromptTask::MappingPolicyVerify => 2,
+        crate::infrastructure::PromptTask::NodeSummary => 3,
+    };
+    hash = hash.wrapping_mul(1099511628211);
+    hash ^= match request.response_format {
+        crate::infrastructure::ResponseFormat::Text => 11,
+        crate::infrastructure::ResponseFormat::JsonObject => 12,
+    };
+    hash = hash.wrapping_mul(1099511628211);
+    hash ^= request.max_tokens as u64;
+    hash = hash.wrapping_mul(1099511628211);
+    hash ^= (request.temperature.to_bits()) as u64;
+    hash = hash.wrapping_mul(1099511628211);
     hash
 }
 
@@ -246,7 +271,9 @@ mod tests {
 
     use crate::domain::graph::ProvenanceSource;
     use crate::domain::{ArchitectureGraph, ArchitectureNode, NodeKind};
-    use crate::infrastructure::{InferenceCache, LlmCompletion, LlmProvider, ModelInfo};
+    use crate::infrastructure::{
+        CompletionRequest, InferenceCache, LlmCompletion, LlmProvider, ModelInfo,
+    };
 
     use super::*;
 
@@ -255,7 +282,12 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for FakeProvider {
-        async fn complete(&self, _prompt: &str) -> crate::error::Result<LlmCompletion> {
+        async fn complete(
+            &self,
+            request: &CompletionRequest,
+        ) -> crate::error::Result<LlmCompletion> {
+            assert!(!request.system_prompt.is_empty());
+            assert!(!request.user_prompt.is_empty());
             Ok(LlmCompletion {
                 text: "fake summary".to_string(),
                 prompt_tokens: 10,
@@ -276,7 +308,10 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for ErrorProvider {
-        async fn complete(&self, _prompt: &str) -> crate::error::Result<LlmCompletion> {
+        async fn complete(
+            &self,
+            _request: &CompletionRequest,
+        ) -> crate::error::Result<LlmCompletion> {
             Err(crate::error::CanopyError::Llm(
                 "provider failure".to_string(),
             ))
@@ -316,7 +351,11 @@ mod tests {
     async fn infer_graph_uses_cache_and_provider() {
         let temp = TempDir::new().expect("temp");
         let cache = InferenceCache::open(&temp.path().join("cache.db")).expect("cache");
-        let mut engine = InferenceEngine::new(Some(Box::new(FakeProvider)), cache);
+        let mut engine = InferenceEngine::new(
+            Some(Box::new(FakeProvider)),
+            cache,
+            "Understand architecture".to_string(),
+        );
         let mut graph = sample_graph();
 
         engine
@@ -330,7 +369,11 @@ mod tests {
             .any(|node| node.summary == "fake summary"));
 
         let cache = InferenceCache::open(&temp.path().join("cache.db")).expect("cache");
-        let mut engine_again = InferenceEngine::new(Some(Box::new(FakeProvider)), cache);
+        let mut engine_again = InferenceEngine::new(
+            Some(Box::new(FakeProvider)),
+            cache,
+            "Understand architecture".to_string(),
+        );
         engine_again
             .infer_graph(&mut graph, "repo_hash")
             .await
@@ -342,7 +385,11 @@ mod tests {
     async fn human_provenance_is_not_overwritten() {
         let temp = TempDir::new().expect("temp");
         let cache = InferenceCache::open(&temp.path().join("cache.db")).expect("cache");
-        let mut engine = InferenceEngine::new(Some(Box::new(FakeProvider)), cache);
+        let mut engine = InferenceEngine::new(
+            Some(Box::new(FakeProvider)),
+            cache,
+            "Understand architecture".to_string(),
+        );
         let mut graph = sample_graph();
         if let Some(component) = graph.node_mut("component:test") {
             component.summary = "human summary".to_string();
@@ -362,7 +409,11 @@ mod tests {
     async fn provider_errors_fall_back_to_local_summary() {
         let temp = TempDir::new().expect("temp");
         let cache = InferenceCache::open(&temp.path().join("cache.db")).expect("cache");
-        let mut engine = InferenceEngine::new(Some(Box::new(ErrorProvider)), cache);
+        let mut engine = InferenceEngine::new(
+            Some(Box::new(ErrorProvider)),
+            cache,
+            "Understand architecture".to_string(),
+        );
         let mut graph = sample_graph();
 
         engine

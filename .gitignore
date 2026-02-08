@@ -10,3 +10,10 @@ target/
 .vscode/
 *.swp
 *.swo
+
+# Python
+__pycache__/
+*.pyc
+
+# Local scratch
+tmp/

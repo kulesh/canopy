@@ -6,6 +6,7 @@ pub struct AppConfig {
     pub workspace_path: Option<PathBuf>,
     pub author: String,
     pub purpose: String,
+    pub no_tui: bool,
 }
 
 impl AppConfig {
@@ -14,12 +15,14 @@ impl AppConfig {
         workspace_path: Option<PathBuf>,
         author: String,
         purpose: String,
+        no_tui: bool,
     ) -> Self {
         Self {
             input_path,
             workspace_path,
             author,
             purpose,
+            no_tui,
         }
     }
 }

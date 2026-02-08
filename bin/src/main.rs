@@ -23,6 +23,9 @@ struct Cli {
         default_value = "Understand the repository architecture for safe agentic changes"
     )]
     purpose: String,
+
+    #[arg(long, default_value_t = false)]
+    no_tui: bool,
 }
 
 #[tokio::main]
@@ -34,6 +37,6 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let config = AppConfig::new(cli.path, cli.workspace, cli.author, cli.purpose);
+    let config = AppConfig::new(cli.path, cli.workspace, cli.author, cli.purpose, cli.no_tui);
     run(config).await
 }

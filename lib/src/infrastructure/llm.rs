@@ -20,6 +20,57 @@ pub struct LlmCompletion {
     pub completion_tokens: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PromptTask {
+    MappingPolicy,
+    MappingPolicyVerify,
+    NodeSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ResponseFormat {
+    Text,
+    JsonObject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompletionRequest {
+    pub task: PromptTask,
+    pub system_prompt: String,
+    pub user_prompt: String,
+    pub response_format: ResponseFormat,
+    pub max_tokens: u32,
+    pub temperature: f32,
+}
+
+impl CompletionRequest {
+    pub fn new(
+        task: PromptTask,
+        system_prompt: String,
+        user_prompt: String,
+        response_format: ResponseFormat,
+    ) -> Self {
+        Self {
+            task,
+            system_prompt,
+            user_prompt,
+            response_format,
+            max_tokens: 512,
+            temperature: 0.1,
+        }
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = max_tokens;
+        self
+    }
+
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = temperature;
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderSelection {
     pub provider_name: Option<String>,
@@ -29,7 +80,7 @@ pub struct ProviderSelection {
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    async fn complete(&self, prompt: &str) -> Result<LlmCompletion>;
+    async fn complete(&self, request: &CompletionRequest) -> Result<LlmCompletion>;
     fn model_info(&self) -> ModelInfo;
 }
 
@@ -124,7 +175,7 @@ impl OpenAiProvider {
 
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
-    async fn complete(&self, prompt: &str) -> Result<LlmCompletion> {
+    async fn complete(&self, request: &CompletionRequest) -> Result<LlmCompletion> {
         let mut candidates = vec![self.model.clone()];
         for fallback in [
             "claude-sonnet-4-20250514",
@@ -140,10 +191,12 @@ impl LlmProvider for AnthropicProvider {
         for model in candidates {
             let req = AnthropicRequest {
                 model: model.clone(),
-                max_tokens: 512,
+                max_tokens: request.max_tokens,
+                temperature: Some(request.temperature),
+                system: Some(request.system_prompt.clone()),
                 messages: vec![AnthropicMessage {
                     role: "user".to_string(),
-                    content: prompt.to_string(),
+                    content: request.user_prompt.clone(),
                 }],
             };
 
@@ -221,13 +274,27 @@ impl LlmProvider for AnthropicProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
-    async fn complete(&self, prompt: &str) -> Result<LlmCompletion> {
+    async fn complete(&self, request: &CompletionRequest) -> Result<LlmCompletion> {
         let req = OpenAiRequest {
             model: self.model.clone(),
-            messages: vec![OpenAiMessage {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-            }],
+            messages: vec![
+                OpenAiMessage {
+                    role: "system".to_string(),
+                    content: request.system_prompt.clone(),
+                },
+                OpenAiMessage {
+                    role: "user".to_string(),
+                    content: request.user_prompt.clone(),
+                },
+            ],
+            response_format: match request.response_format {
+                ResponseFormat::JsonObject => Some(OpenAiResponseFormat {
+                    kind: "json_object".to_string(),
+                }),
+                ResponseFormat::Text => None,
+            },
+            max_tokens: Some(request.max_tokens),
+            temperature: Some(request.temperature),
         };
 
         let mut attempts = 0u8;
@@ -290,6 +357,10 @@ impl LlmProvider for OpenAiProvider {
 struct AnthropicRequest {
     model: String,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
     messages: Vec<AnthropicMessage>,
 }
 
@@ -320,12 +391,24 @@ struct AnthropicUsage {
 struct OpenAiRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<OpenAiResponseFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
 }
 
 #[derive(Debug, Serialize)]
 struct OpenAiMessage {
     role: String,
     content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiResponseFormat {
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[derive(Debug, Deserialize)]

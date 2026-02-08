@@ -1,4 +1,6 @@
 pub mod config;
+pub mod diagnostics;
+pub mod harness;
 pub mod query;
 pub mod runner;
 pub mod state;

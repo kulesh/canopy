@@ -9,6 +9,7 @@ async fn main() -> Result<()> {
         None,
         "example".to_string(),
         "Example architecture walkthrough".to_string(),
+        false,
     );
     run(config).await
 }

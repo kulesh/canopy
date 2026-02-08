@@ -1,9 +1,12 @@
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 use chrono::Utc;
 use regex::Regex;
 
 use crate::domain::{ArchitectureGraph, QueryAnswer, QueryReference};
+
+static MENTION_RE: OnceLock<std::result::Result<Regex, regex::Error>> = OnceLock::new();
 
 pub fn answer_query(graph: &ArchitectureGraph, query: &str) -> QueryAnswer {
     let mut references = mentions(graph, query);
@@ -46,7 +49,13 @@ pub fn answer_query(graph: &ArchitectureGraph, query: &str) -> QueryAnswer {
 }
 
 pub fn mentions(graph: &ArchitectureGraph, query: &str) -> Vec<QueryReference> {
-    let mention_re = Regex::new(r"@([A-Za-z0-9_\-\.:/]+)").expect("mention regex is valid");
+    let Some(mention_re) = MENTION_RE
+        .get_or_init(|| Regex::new(r"@([A-Za-z0-9_\-\.:/]+)"))
+        .as_ref()
+        .ok()
+    else {
+        return Vec::new();
+    };
     let mut refs = Vec::new();
     let mut seen = BTreeSet::new();
 

@@ -6,7 +6,10 @@ use git2::Repository as GitRepository;
 use ignore::WalkBuilder;
 use regex::Regex;
 
-use super::mapping_policy::{is_source_file, normalize_path, policy_index, C4MappingPolicy};
+use super::mapping_policy::{
+    contributions_by_file, is_source_file, normalize_path, policy_index, C4MappingPolicy,
+    ComponentContribution, FileMappingRule,
+};
 use crate::domain::{ArchitectureGraph, ArchitectureNode, NodeKind, Repository};
 use crate::error::{CanopyError, Result};
 
@@ -120,7 +123,7 @@ where
 
     let mut source_files = Vec::new();
     let mut walker = WalkBuilder::new(&repository.root);
-    walker.hidden(false);
+    walker.hidden(true);
     walker.git_ignore(true);
     walker.git_exclude(true);
     walker.parents(true);
@@ -161,6 +164,7 @@ where
     let mut excluded_files = 0usize;
 
     let policy_lookup = policy.map(policy_index);
+    let contribution_lookup = policy.map(contributions_by_file);
 
     for file in source_files {
         let rel = match file.strip_prefix(&repository.root) {
@@ -168,87 +172,45 @@ where
             Err(_) => continue,
         };
 
-        let placement = if let Some(lookup) = &policy_lookup {
-            let key = normalize_path(&rel.to_string_lossy());
-            let Some(rule) = lookup.get(&key) else {
-                return Err(CanopyError::Validation(format!(
-                    "mapping policy missing file: {key}"
-                )));
+        let placements =
+            if let (Some(lookup), Some(contrib_lookup)) = (&policy_lookup, &contribution_lookup) {
+                policy_file_placements(&rel, lookup, contrib_lookup)?
+            } else {
+                vec![fallback_file_placement(&rel)?]
             };
-            if !rule.include {
-                excluded_files += 1;
-                continue;
-            }
 
-            included_files += 1;
-            let container_name = rule
-                .container
-                .as_ref()
-                .map(|v| normalize_path(v).replace('/', "::"))
-                .filter(|v| !v.trim().is_empty())
-                .ok_or_else(|| {
-                    CanopyError::Validation(format!(
-                        "include=true without container for {}",
-                        rule.file
-                    ))
-                })?;
-            let component_name = rule
-                .component
-                .as_ref()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| {
-                    CanopyError::Validation(format!(
-                        "include=true without component for {}",
-                        rule.file
-                    ))
-                })?;
+        if placements.is_empty() {
+            excluded_files += 1;
+            continue;
+        }
+        included_files += 1;
 
-            let mut aliases = module_aliases(&rel);
-            aliases.insert(component_name.to_lowercase());
+        for placement in placements {
+            container_paths
+                .entry(placement.container_name.clone())
+                .or_insert_with(|| repository.root.join(&placement.container_name));
 
-            FilePlacement {
-                container_name,
-                component_name: component_name.clone(),
-                component_key: format!(
-                    "policy:{}:{}",
-                    rel.parent()
-                        .map(|v| normalize_path(&v.to_string_lossy()))
-                        .unwrap_or_else(|| "root".to_string()),
-                    component_name.to_lowercase()
-                ),
-                component_path: rel.clone(),
-                aliases,
-            }
-        } else {
-            included_files += 1;
-            fallback_file_placement(&rel)?
-        };
+            let container_id = format!("container:{}", sanitize_id(&placement.container_name));
+            let component_id = format!(
+                "component:{}:{}",
+                sanitize_id(&placement.container_name),
+                sanitize_id(&placement.component_key)
+            );
 
-        container_paths
-            .entry(placement.container_name.clone())
-            .or_insert_with(|| repository.root.join(&placement.container_name));
+            let entry = collected_components
+                .entry(component_id.clone())
+                .or_insert_with(|| CollectedComponent {
+                    id: component_id.clone(),
+                    name: placement.component_name.clone(),
+                    path: placement.component_path.clone(),
+                    parent_id: container_id,
+                    code_units: Vec::new(),
+                    aliases: BTreeSet::new(),
+                });
 
-        let container_id = format!("container:{}", sanitize_id(&placement.container_name));
-        let component_id = format!(
-            "component:{}:{}",
-            sanitize_id(&placement.container_name),
-            sanitize_id(&placement.component_key)
-        );
-
-        let entry = collected_components
-            .entry(component_id.clone())
-            .or_insert_with(|| CollectedComponent {
-                id: component_id.clone(),
-                name: placement.component_name.clone(),
-                path: placement.component_path.clone(),
-                parent_id: container_id,
-                code_units: Vec::new(),
-                aliases: BTreeSet::new(),
-            });
-
-        entry.code_units.push(rel);
-        entry.aliases.extend(placement.aliases);
+            entry.code_units.push(rel.clone());
+            entry.aliases.extend(placement.aliases);
+        }
     }
 
     if policy.is_some() {
@@ -285,7 +247,11 @@ where
         graph.add_node(component_node);
 
         for code_rel in &component.code_units {
-            let code_id = format!("code:{}", sanitize_id(code_rel.to_string_lossy().as_ref()));
+            let code_id = format!(
+                "code:{}:{}",
+                sanitize_id(&component.id),
+                sanitize_id(code_rel.to_string_lossy().as_ref())
+            );
             let mut code_node = ArchitectureNode::new(
                 code_id,
                 code_rel.to_string_lossy().to_string(),
@@ -421,6 +387,115 @@ fn infer_dependencies(
     }
 
     Ok(())
+}
+
+fn policy_file_placements<'a>(
+    rel: &Path,
+    lookup: &BTreeMap<String, &'a FileMappingRule>,
+    contributions: &BTreeMap<String, Vec<&'a ComponentContribution>>,
+) -> Result<Vec<FilePlacement>> {
+    let key = normalize_path(&rel.to_string_lossy());
+    let mapping_rule = lookup.get(&key).copied();
+    let file_contributions = contributions.get(&key).cloned().unwrap_or_default();
+
+    if !file_contributions.is_empty() {
+        if mapping_rule.map(|rule| !rule.include).unwrap_or(false) {
+            return Err(CanopyError::Validation(format!(
+                "file {key} has include=false mapping but semantic contributions are present"
+            )));
+        }
+        let mut placements: BTreeMap<String, FilePlacement> = BTreeMap::new();
+        for contribution in file_contributions {
+            let placement = placement_from_contribution(rel, contribution)?;
+            placements
+                .entry(placement.component_key.clone())
+                .or_insert(placement);
+        }
+        return Ok(placements.into_values().collect());
+    }
+
+    let Some(rule) = mapping_rule else {
+        return Err(CanopyError::Validation(format!(
+            "mapping policy missing file: {key}"
+        )));
+    };
+
+    if !rule.include {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![placement_from_mapping(rel, rule)?])
+}
+
+fn placement_from_contribution(
+    rel: &Path,
+    contribution: &ComponentContribution,
+) -> Result<FilePlacement> {
+    let container_name = normalize_path(&contribution.container).replace('/', "::");
+    if container_name.is_empty() {
+        return Err(CanopyError::Validation(format!(
+            "contribution requires non-empty container for file {}",
+            contribution.file
+        )));
+    }
+    let component_name = contribution.component.trim().to_string();
+    if component_name.is_empty() {
+        return Err(CanopyError::Validation(format!(
+            "contribution requires non-empty component for file {}",
+            contribution.file
+        )));
+    }
+
+    let mut aliases = module_aliases(rel);
+    aliases.insert(component_name.to_lowercase());
+
+    Ok(FilePlacement {
+        container_name,
+        component_name: component_name.clone(),
+        component_key: format!(
+            "semantic:{}:{}",
+            normalize_path(&contribution.file),
+            component_name.to_lowercase()
+        ),
+        component_path: rel.to_path_buf(),
+        aliases,
+    })
+}
+
+fn placement_from_mapping(rel: &Path, rule: &FileMappingRule) -> Result<FilePlacement> {
+    let container_name = rule
+        .container
+        .as_ref()
+        .map(|v| normalize_path(v).replace('/', "::"))
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| {
+            CanopyError::Validation(format!("include=true without container for {}", rule.file))
+        })?;
+    let component_name = rule
+        .component
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            CanopyError::Validation(format!("include=true without component for {}", rule.file))
+        })?;
+
+    let mut aliases = module_aliases(rel);
+    aliases.insert(component_name.to_lowercase());
+
+    Ok(FilePlacement {
+        container_name,
+        component_name: component_name.clone(),
+        component_key: format!(
+            "policy:{}:{}",
+            rel.parent()
+                .map(|v| normalize_path(&v.to_string_lossy()))
+                .unwrap_or_else(|| "root".to_string()),
+            component_name.to_lowercase()
+        ),
+        component_path: rel.to_path_buf(),
+        aliases,
+    })
 }
 
 fn fallback_file_placement(rel: &Path) -> Result<FilePlacement> {
