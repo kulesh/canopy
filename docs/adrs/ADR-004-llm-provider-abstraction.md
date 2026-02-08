@@ -7,7 +7,7 @@ Status: Accepted
 Canopy needs BYOK and provider flexibility.
 
 ## Decision
-Define `LlmProvider` trait with `complete()` and `model_info()`; implement:
+Define `LlmProvider` trait with request-driven `complete(CompletionRequest)` and `model_info()`; implement:
 - Anthropic (`ANTHROPIC_API_KEY`)
 - OpenAI (`OPENAI_API_KEY`)
 
@@ -16,3 +16,4 @@ Selection order: Anthropic first, then OpenAI. If neither key exists, run local 
 ## Consequences
 - Stable extension point for future providers.
 - Zero-config startup still works in degraded AI mode.
+- Harness orchestration remains decoupled from provider wiring behind `HarnessAdapter`.

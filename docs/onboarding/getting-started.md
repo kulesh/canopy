@@ -21,6 +21,9 @@ cargo run -p canopy-bin -- /path/to/repo
 
 # Analyze with explicit architectural purpose
 cargo run -p canopy-bin -- --purpose "Understand auth and billing boundaries" /path/to/repo
+
+# Run startup pipeline checks without launching TUI
+cargo run -p canopy-bin -- --no-tui /path/to/repo
 ```
 
 ## Optional AI configuration
@@ -37,5 +40,9 @@ Without keys, Canopy uses fallback mapping and local summaries.
 
 ## Startup model
 - Architecture tree loads first.
+- Policy construction shows startup progress with phase bars and tool-call activity.
 - Semantic summaries hydrate progressively in the background.
 - Progress appears in the status line during inference.
+
+## Diagnostics
+- Structured startup/harness diagnostics are written to `.canopy/logs/diagnostics.jsonl`.

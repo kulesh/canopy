@@ -108,6 +108,7 @@ Keep the project directory clean and organized at all times so it is easier to f
 - Documentation index: `docs/index.md`
 - Product specs: `docs/specs/`
 - Scope lock: `docs/specs/mvp-scope-lock.md`
+- Architecture diagrams: `docs/architecture/ai-engineering-and-c4-pipeline.md`
 - ADRs: `docs/adrs/`
 - Testing strategy: `docs/testing/strategy.md`
 - Onboarding: `docs/onboarding/`
@@ -276,23 +277,37 @@ cargo build --timings
 ```
 canopy/
 ├── Cargo.toml              # Workspace configuration
+├── Cargo.lock
+├── README.md
+├── AGENTS.md
+├── .mise.toml
+├── .gitignore
 ├── lib/
-│   ├── Cargo.toml          # Library package manifest
+│   ├── Cargo.toml
 │   └── src/
-│       └── lib.rs          # Library root module
+│       ├── lib.rs
+│       ├── application/
+│       ├── domain/
+│       ├── inference/
+│       ├── infrastructure/
+│       └── tui/
+│   ├── tests/
+│   └── benches/
 ├── bin/
-│   ├── Cargo.toml          # Binary package manifest
+│   ├── Cargo.toml
 │   └── src/
-│       └── main.rs         # Binary entry point
+│       └── main.rs
+│   └── tests/
+├── docs/
+│   ├── specs/
+│   ├── architecture/
+│   ├── adrs/
+│   ├── onboarding/
+│   ├── testing/
+│   └── releases/
 ├── examples/
-│   └── basic.rs            # Example usage
-├── tests/
-│   └── integration.rs      # Integration tests
-├── benches/
-│   └── benchmark.rs        # Performance benchmarks
-├── .mise.toml              # mise configuration
-├── .gitignore              # Git ignore patterns
-└── README.md               # Project documentation
+│   └── basic.rs
+└── tmp/
 ```
 
 ## Development Guidelines
@@ -309,7 +324,7 @@ canopy/
 
 - Use `?` operator for error propagation
 - Create custom error types using `thiserror` for libraries
-- Use `anyhow` for application-level error handling (binary)
+- Prefer project `Result<T>` aliases from `canopy_lib::error`
 - Avoid `unwrap()` and `expect()` in library code
 - Provide meaningful error messages
 
@@ -375,18 +390,16 @@ pub enum AppError {
 pub type Result<T> = std::result::Result<T, AppError>;
 ```
 
-### Using anyhow in Binary
+### Using canopy Result in Binary
 
 ```rust
 // In bin/src/main.rs
-use anyhow::{Context, Result};
+use canopy_lib::{run, AppConfig, Result};
 
-fn main() -> Result<()> {
-    let config = load_config()
-        .context("Failed to load configuration")?;
-
-    run_app(config)?;
-    Ok(())
+#[tokio::main]
+async fn main() -> Result<()> {
+    let config = AppConfig::new(...);
+    run(config).await
 }
 ```
 
@@ -489,7 +502,6 @@ fn main() {
 ### Essential
 
 ```bash
-cargo add anyhow          # Error handling (binary)
 cargo add thiserror       # Error types (library)
 cargo add serde --features derive  # Serialization
 cargo add tokio --features full    # Async runtime
@@ -499,9 +511,8 @@ cargo add tokio --features full    # Async runtime
 
 ```bash
 cargo add clap --features derive   # CLI parsing
-cargo add config                   # Configuration
-cargo add env_logger              # Logging
-cargo add log                     # Logging facade
+cargo add tracing                 # Logging facade
+cargo add tracing-subscriber      # Logging setup
 ```
 
 ### Testing & Dev

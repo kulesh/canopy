@@ -2,8 +2,9 @@
 
 - [x] `cargo fmt -- --check` passes
 - [x] `cargo clippy --all-targets --all-features -- -D warnings` passes
-- [x] `cargo test` passes
+- [x] `cargo test --workspace` passes
 - [x] `cargo nextest run --workspace` passes
+- [x] `cargo bench -p canopy-lib --no-run` passes
 - [x] CI workflow present (`.github/workflows/ci.yml`)
 - [x] Core docs linked from README
 - [x] `.canopy/` persistence contract implemented
