@@ -71,28 +71,31 @@ pub async fn generate_mapping_policy_with_progress<F>(
 where
     F: FnMut(HarnessProgressEvent),
 {
-    let sdk_adapter = ClaudeSdkHarnessAdapter::new();
-    match sdk_adapter
+    if std::env::var_os("CANOPY_SKIP_SDK_HARNESS").is_none() {
+        let sdk_adapter = ClaudeSdkHarnessAdapter::new();
+        match sdk_adapter
+            .generate_mapping_policy_with_progress(repository, purpose, &mut on_progress)
+            .await
+        {
+            Ok(policy) => return Ok(policy),
+            Err(err) if provider.is_some() => {
+                on_progress(HarnessProgressEvent::Phase {
+                    label: "Falling back to native harness",
+                    percent: 70,
+                });
+                warn!(
+                    repo = %repository.root.display(),
+                    error = %err,
+                    "claude sdk harness failed; falling back to native llm harness"
+                );
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    LlmHarnessAdapter::new(provider)
         .generate_mapping_policy_with_progress(repository, purpose, &mut on_progress)
         .await
-    {
-        Ok(policy) => Ok(policy),
-        Err(err) if provider.is_some() => {
-            on_progress(HarnessProgressEvent::Phase {
-                label: "Falling back to native harness",
-                percent: 70,
-            });
-            warn!(
-                repo = %repository.root.display(),
-                error = %err,
-                "claude sdk harness failed; falling back to native llm harness"
-            );
-            LlmHarnessAdapter::new(provider)
-                .generate_mapping_policy_with_progress(repository, purpose, &mut on_progress)
-                .await
-        }
-        Err(err) => Err(err),
-    }
 }
 
 pub struct LlmHarnessAdapter<'a> {

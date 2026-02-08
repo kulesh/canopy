@@ -24,6 +24,7 @@ fn no_tui_startup_reports_pipeline_stages() {
         .arg(repo.path())
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
+        .env("CANOPY_SKIP_SDK_HARNESS", "1")
         .output()
         .expect("run canopy");
 
