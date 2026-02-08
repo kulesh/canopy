@@ -1,0 +1,5 @@
+[tools]
+rust = "latest"
+"cargo:cargo-nextest" = "latest"
+"cargo:cargo-watch" = "latest"
+"cargo:cargo-llvm-cov" = "latest"
