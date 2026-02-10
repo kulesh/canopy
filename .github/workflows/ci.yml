@@ -2,8 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-test:
@@ -12,32 +12,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup mise
-        uses: jdx/mise-action@v2
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-      - name: Install tools via mise
-        run: mise install
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Format check
-        run: mise exec -- cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: mise exec -- cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Tests (nextest)
-        run: mise exec -- cargo nextest run --workspace
+        run: cargo nextest run --workspace
 
       - name: Tests (workspace)
-        run: mise exec -- cargo test --workspace
+        run: cargo test --workspace
 
       - name: Doctests
-        run: mise exec -- cargo test --workspace --doc
+        run: cargo test --workspace --doc
 
       - name: Bench compile
-        run: mise exec -- cargo bench -p canopy-lib --no-run
+        run: cargo bench -p canopy-lib --no-run
 
       - name: Build
-        run: mise exec -- cargo build --workspace
+        run: cargo build --workspace

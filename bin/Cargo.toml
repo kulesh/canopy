@@ -1,9 +1,12 @@
 [package]
 name = "canopy-bin"
+description = "Flight deck for agentic coding"
+homepage = "https://github.com/kulesh/canopy"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "canopy"
