@@ -16,6 +16,12 @@ mod render;
 use render::render;
 
 pub fn run_tui(state: &mut AppState) -> Result<()> {
+    if std::env::var("CANOPY_TUI_TEST_MODE").as_deref() == Ok("1") {
+        state.poll_project_events();
+        state.poll_inference_events();
+        return Ok(());
+    }
+
     enable_raw_mode().map_err(|source| crate::error::CanopyError::io("terminal", source))?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)
@@ -26,6 +32,7 @@ pub fn run_tui(state: &mut AppState) -> Result<()> {
 
     let result = loop {
         state.poll_inference_events();
+        state.poll_project_events();
         terminal
             .draw(|frame| render(frame, state))
             .map_err(|source| crate::error::CanopyError::io("terminal", source))?;
@@ -40,7 +47,7 @@ pub fn run_tui(state: &mut AppState) -> Result<()> {
             if let Event::Key(key) =
                 event::read().map_err(|source| crate::error::CanopyError::io("terminal", source))?
             {
-                let (mut action, pending_g) = map_key_to_action(key, state.pending_g);
+                let (mut action, pending_g) = map_key_to_action(key, state.pending_g, state.mode);
                 state.pending_g = pending_g;
 
                 if key.code == KeyCode::Enter {

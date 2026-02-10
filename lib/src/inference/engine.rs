@@ -39,10 +39,17 @@ pub enum InferenceProgress {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceExecutionMode {
+    StrictModel,
+    HybridFallback,
+}
+
 pub struct InferenceEngine {
     provider: Option<Box<dyn LlmProvider>>,
     cache: InferenceCache,
     purpose: String,
+    mode: InferenceExecutionMode,
     pub stats: InferenceStats,
 }
 
@@ -52,10 +59,25 @@ impl InferenceEngine {
         cache: InferenceCache,
         purpose: String,
     ) -> Self {
+        Self::new_with_mode(
+            provider,
+            cache,
+            purpose,
+            InferenceExecutionMode::StrictModel,
+        )
+    }
+
+    pub fn new_with_mode(
+        provider: Option<Box<dyn LlmProvider>>,
+        cache: InferenceCache,
+        purpose: String,
+        mode: InferenceExecutionMode,
+    ) -> Self {
         Self {
             provider,
             cache,
             purpose,
+            mode,
             stats: InferenceStats::default(),
         }
     }
@@ -87,6 +109,15 @@ impl InferenceEngine {
             .count();
         let mut processed = 0usize;
         on_progress(InferenceProgress::Started { total_nodes });
+        if self.mode == InferenceExecutionMode::StrictModel && self.provider.is_none() {
+            on_progress(InferenceProgress::ProviderDisabled {
+                reason: "strict summaries require an AI provider".to_string(),
+            });
+            on_progress(InferenceProgress::Completed {
+                stats: self.stats.clone(),
+            });
+            return Ok(());
+        }
 
         for node_id in ids {
             let Some(node_snapshot) = graph.node(&node_id).cloned() else {
@@ -141,20 +172,28 @@ impl InferenceEngine {
                                 on_progress(InferenceProgress::ProviderDisabled {
                                     reason: err.to_string(),
                                 });
-                                let local = local_summary(&node_snapshot, graph);
-                                self.cache.set(&cache_key, &local)?;
-                                (local, 0.55, 0, 0, "local")
+                                if self.mode == InferenceExecutionMode::HybridFallback {
+                                    let local = local_summary(&node_snapshot, graph);
+                                    self.cache.set(&cache_key, &local)?;
+                                    (local, 0.55, 0, 0, "local")
+                                } else {
+                                    continue;
+                                }
                             }
                         }
-                    } else {
+                    } else if self.mode == InferenceExecutionMode::HybridFallback {
                         let local = local_summary(&node_snapshot, graph);
                         self.cache.set(&cache_key, &local)?;
                         (local, 0.55, 0, 0, "local")
+                    } else {
+                        continue;
                     }
-                } else {
+                } else if self.mode == InferenceExecutionMode::HybridFallback {
                     let local = local_summary(&node_snapshot, graph);
                     self.cache.set(&cache_key, &local)?;
                     (local, 0.55, 0, 0, "local")
+                } else {
+                    continue;
                 }
             };
 
@@ -209,7 +248,11 @@ impl InferenceEngine {
                 }
             }
         }
-        Some((local_summary(node, graph), 0.55, "local"))
+        if self.mode == InferenceExecutionMode::HybridFallback {
+            Some((local_summary(node, graph), 0.55, "local"))
+        } else {
+            None
+        }
     }
 }
 
@@ -409,10 +452,11 @@ mod tests {
     async fn provider_errors_fall_back_to_local_summary() {
         let temp = TempDir::new().expect("temp");
         let cache = InferenceCache::open(&temp.path().join("cache.db")).expect("cache");
-        let mut engine = InferenceEngine::new(
+        let mut engine = InferenceEngine::new_with_mode(
             Some(Box::new(ErrorProvider)),
             cache,
             "Understand architecture".to_string(),
+            InferenceExecutionMode::HybridFallback,
         );
         let mut graph = sample_graph();
 
@@ -424,5 +468,26 @@ mod tests {
         let component = graph.node("component:test").expect("component");
         assert!(!component.summary.is_empty());
         assert!((component.confidence - 0.55).abs() < f32::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn strict_mode_does_not_fallback_to_local_summary() {
+        let temp = TempDir::new().expect("temp");
+        let cache = InferenceCache::open(&temp.path().join("cache.db")).expect("cache");
+        let mut engine = InferenceEngine::new_with_mode(
+            Some(Box::new(ErrorProvider)),
+            cache,
+            "Understand architecture".to_string(),
+            InferenceExecutionMode::StrictModel,
+        );
+        let mut graph = sample_graph();
+
+        engine
+            .infer_graph(&mut graph, "repo_hash")
+            .await
+            .expect("inference should not fail");
+
+        let component = graph.node("component:test").expect("component");
+        assert!(component.summary.is_empty());
     }
 }

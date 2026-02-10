@@ -5,6 +5,7 @@
 - Product specification: `docs/specs/product-spec-20260206-033853.md`
 - MVP scope lock: `docs/specs/mvp-scope-lock.md`
 - Implementation plan: `docs/implementation/canopy-implementation-plan-20260207.md`
+- Project view and async onboarding spec: `docs/implementation/project-view-and-async-onboarding-spec-20260210.md`
 
 ## Architecture Views
 - AI engineering and C4 pipeline diagrams: `docs/architecture/ai-engineering-and-c4-pipeline.md`
@@ -21,6 +22,8 @@
 - Prompt contracts and repair loop: `docs/adrs/ADR-008-prompt-contracts-and-repair-loop.md`
 - Harness adapter and policy verifier loop: `docs/adrs/ADR-009-harness-adapter-and-policy-verifier.md`
 - Claude Agent migration seam and timing: `docs/adrs/ADR-010-claude-agent-migration-seam.md`
+- Project view and async onboarding: `docs/adrs/ADR-011-project-view-and-async-onboarding.md`
+- Strict model-first mapping: `docs/adrs/ADR-012-strict-model-first-mapping.md`
 
 ## Onboarding and Ops
 - Getting started: `docs/onboarding/getting-started.md`

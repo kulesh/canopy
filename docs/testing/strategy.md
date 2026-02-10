@@ -20,3 +20,5 @@
 - Every dependency edge references an existing node.
 - Graph root is always present.
 - Dependents index can be rebuilt deterministically.
+- Strict mode never produces a ready architecture graph without model policy output.
+- In strict mode, component naming and dependency edges are sourced from policy payload only.

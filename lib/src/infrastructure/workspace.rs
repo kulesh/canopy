@@ -79,3 +79,41 @@ pub fn merge_workspace_graphs(graphs: &[(String, ArchitectureGraph)]) -> Archite
     out.rebuild_dependents();
     out
 }
+
+pub fn upsert_workspace_repository_graph(
+    graphs: &mut BTreeMap<String, ArchitectureGraph>,
+    repository_name: impl Into<String>,
+    graph: ArchitectureGraph,
+) -> ArchitectureGraph {
+    graphs.insert(repository_name.into(), graph);
+    let ordered: Vec<(String, ArchitectureGraph)> = graphs
+        .iter()
+        .map(|(name, graph)| (name.clone(), graph.clone()))
+        .collect();
+    merge_workspace_graphs(&ordered)
+}
+
+pub fn merged_graph_for_active_repository(
+    graphs: &BTreeMap<String, ArchitectureGraph>,
+    active_repository: &str,
+) -> ArchitectureGraph {
+    if graphs.contains_key(active_repository) {
+        let mut ordered = Vec::with_capacity(graphs.len());
+        if let Some(graph) = graphs.get(active_repository) {
+            ordered.push((active_repository.to_string(), graph.clone()));
+        }
+        for (name, graph) in graphs {
+            if name == active_repository {
+                continue;
+            }
+            ordered.push((name.clone(), graph.clone()));
+        }
+        return merge_workspace_graphs(&ordered);
+    }
+
+    let ordered: Vec<(String, ArchitectureGraph)> = graphs
+        .iter()
+        .map(|(name, graph)| (name.clone(), graph.clone()))
+        .collect();
+    merge_workspace_graphs(&ordered)
+}

@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use git2::{DiffOptions, Repository};
@@ -120,4 +120,33 @@ pub fn compare_branches(
     }
 
     Ok(summary)
+}
+
+pub fn head_tree_hash(repo_root: &Path) -> Result<String> {
+    let repo = Repository::discover(repo_root)?;
+    let head = repo.head()?;
+    let commit = head.peel_to_commit()?;
+    let tree = commit.tree()?;
+    Ok(tree.id().to_string())
+}
+
+pub fn changed_files_between_tree_hashes(
+    repo_root: &Path,
+    old_tree_hash: &str,
+    new_tree_hash: &str,
+) -> Result<Vec<PathBuf>> {
+    let repo = Repository::discover(repo_root)?;
+    let old_oid = git2::Oid::from_str(old_tree_hash)?;
+    let new_oid = git2::Oid::from_str(new_tree_hash)?;
+    let old_tree = repo.find_tree(old_oid)?;
+    let new_tree = repo.find_tree(new_oid)?;
+    let diff = repo.diff_tree_to_tree(Some(&old_tree), Some(&new_tree), None)?;
+
+    let mut changed = Vec::new();
+    for delta in diff.deltas() {
+        if let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) {
+            changed.push(path.to_path_buf());
+        }
+    }
+    Ok(changed)
 }

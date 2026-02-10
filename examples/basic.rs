@@ -7,9 +7,9 @@ async fn main() -> Result<()> {
     let config = AppConfig::new(
         PathBuf::from("."),
         None,
+        None,
         "example".to_string(),
         "Example architecture walkthrough".to_string(),
-        false,
     );
     run(config).await
 }

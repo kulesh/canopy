@@ -46,3 +46,10 @@ flowchart TD
 2. Every source file must be explicitly included or excluded by policy.
 3. Policy output must satisfy structural and semantic validation before acceptance.
 4. Deterministic graph materialization preserves repeatability after policy approval.
+
+## Strict Execution Guarantees
+
+1. `strict_model` mode is the default mapping execution mode.
+2. Fresh onboarding requires a provider-generated policy before a repository can become ready.
+3. Component dependencies are sourced from policy JSON; local regex dependency inference is not used in strict mode.
+4. Local heuristic mapping remains available only behind `legacy_hybrid` for migration/testing workflows.

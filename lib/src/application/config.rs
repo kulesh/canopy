@@ -4,25 +4,25 @@ use std::path::PathBuf;
 pub struct AppConfig {
     pub input_path: PathBuf,
     pub workspace_path: Option<PathBuf>,
+    pub project_path: Option<PathBuf>,
     pub author: String,
     pub purpose: String,
-    pub no_tui: bool,
 }
 
 impl AppConfig {
     pub fn new(
         input_path: PathBuf,
         workspace_path: Option<PathBuf>,
+        project_path: Option<PathBuf>,
         author: String,
         purpose: String,
-        no_tui: bool,
     ) -> Self {
         Self {
             input_path,
             workspace_path,
+            project_path,
             author,
             purpose,
-            no_tui,
         }
     }
 }

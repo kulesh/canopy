@@ -95,21 +95,27 @@ pub fn mapping_policy_request(
         "Execution rules:".to_string(),
         "- You may use repository tools (Read, Grep, Glob, Bash) to inspect files before deciding mappings.".to_string(),
         "- Choose which files to inspect yourself, prioritizing ambiguous paths and container boundaries.".to_string(),
+        "- First pass focus: implementation/runtime source first. Treat tests/fixtures/mocks as secondary unless they define core runtime behavior.".to_string(),
+        "- You may inspect docs/specs/README for domain context, but do not map docs as code components.".to_string(),
         "- Build decisions from file CONTENT, not path names.".to_string(),
         "- Do not rely on file names alone when assigning component names.".to_string(),
+        "- Derive component names from parsed declarations when possible (classes, modules, functions), not file stems.".to_string(),
         "Classification rules:".to_string(),
         "- Classify EVERY listed source file exactly once in mappings[].".to_string(),
         "- If include=true, container and component must be non-empty and stable across related files.".to_string(),
         "- For every included file, emit one or more contributions[] entries with evidence spans tied to real source lines.".to_string(),
+        "- Emit dependencies[] as explicit component-level edges using {from:{container,component},to:{container,component},confidence,rationale}.".to_string(),
         "- include=false for noise/boilerplate-only files unless they orchestrate meaningful behavior.".to_string(),
         "- Do not create components that are only '__init__', 'mod', 'index', or filename placeholders unless file content is clearly behavioral.".to_string(),
         "- Favor fewer coherent components over many tiny filename-derived ones.".to_string(),
         "- Confidence in [0,1].".to_string(),
         "Output contract:".to_string(),
         "- Return STRICT JSON only. No prose, no markdown fences.".to_string(),
-        "- Exact top-level keys: mappings, contributions, semantic_asts, notes.".to_string(),
+        "- Exact top-level keys: mappings, contributions, dependencies, semantic_asts, notes.".to_string(),
         "- contributions[] item shape: {\"file\":\"src/main.rs\",\"container\":\"app\",\"component\":\"entrypoint\",\"confidence\":0.93,\"rationale\":\"behavior\",\"evidence\":[{\"file\":\"src/main.rs\",\"start_line\":10,\"end_line\":22,\"excerpt\":\"fn main\",\"reason\":\"entrypoint orchestration\"}]}".to_string(),
+        "- dependencies[] item shape: {\"from\":{\"container\":\"app\",\"component\":\"entrypoint\"},\"to\":{\"container\":\"app\",\"component\":\"billing\"},\"confidence\":0.82,\"rationale\":\"imports billing workflow\"}".to_string(),
         "- semantic_asts[] should summarize parsed code structure per file (functions/classes/modules with line spans).".to_string(),
+        "- For each included file, semantic_asts should include the key declarations that justified component naming.".to_string(),
     ];
 
     let mut user = Vec::new();
@@ -169,6 +175,8 @@ pub fn mapping_policy_verification_request(
         "- Every included file must have evidence-backed contributions with valid line spans.".to_string(),
         "- Containers should be coarse architectural boundaries, not file names.".to_string(),
         "- Components must be behavior-based and non-placeholder.".to_string(),
+        "- Component names should align with parsed declarations or explicit behavioral role, not raw filename stems.".to_string(),
+        "- Dependency edges must reference existing components and avoid self-cycles.".to_string(),
         "- Group related files consistently; avoid arbitrary splitting.".to_string(),
         "- Use repository tools if needed to verify ambiguous mappings.".to_string(),
         "Output contract:".to_string(),
@@ -226,6 +234,9 @@ mod tests {
         assert_eq!(request.response_format, ResponseFormat::JsonObject);
         assert!(request.system_prompt.contains("STRICT JSON"));
         assert!(request.system_prompt.contains("C4 interpretation rules"));
+        assert!(request.system_prompt.contains("First pass focus"));
+        assert!(request.system_prompt.contains("parsed declarations"));
+        assert!(request.system_prompt.contains("dependencies[]"));
         assert!(request.system_prompt.contains("__init__"));
         assert!(request.user_prompt.contains("src/main.rs"));
     }
@@ -320,6 +331,7 @@ mod tests {
             notes: None,
             mappings: vec![],
             contributions: vec![],
+            dependencies: vec![],
             semantic_asts: vec![],
         };
 

@@ -2,9 +2,9 @@ use std::fs;
 
 use canopy_lib::application::query::answer_query;
 use canopy_lib::domain::graph::{Provenance, ProvenanceSource};
-use canopy_lib::domain::{ArchitectureGraph, ArchitectureNode, EditLogEntry, NodeKind};
+use canopy_lib::domain::{ArchitectureGraph, ArchitectureNode, EditLogEntry, NodeKind, Repository};
 use canopy_lib::infrastructure::{
-    discover_repository, map_repository_architecture, map_repository_architecture_with_policy,
+    collect_source_tree_snapshot, discover_repository, map_repository_architecture_with_policy,
     C4MappingPolicy, ComponentContribution, EvidenceSpan, FileMappingRule, PersistenceStore,
 };
 use chrono::Utc;
@@ -29,17 +29,103 @@ fn make_repo() -> TempDir {
     dir
 }
 
+fn strict_smoke_policy(repository: &Repository) -> C4MappingPolicy {
+    let snapshot = collect_source_tree_snapshot(repository).expect("snapshot");
+    let mut mappings = Vec::new();
+    let mut contributions = Vec::new();
+    for file in snapshot.files {
+        let path = std::path::Path::new(&file);
+        let container = path
+            .components()
+            .next()
+            .and_then(|component| component.as_os_str().to_str())
+            .unwrap_or("app")
+            .to_string();
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unit");
+        let component = if stem == "__init__" || stem == "mod" || stem == "index" {
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("app")
+                .to_string()
+        } else {
+            stem.to_string()
+        };
+        mappings.push(FileMappingRule {
+            file: file.clone(),
+            include: true,
+            container: Some(container.clone()),
+            component: Some(component.clone()),
+            confidence: 0.75,
+            rationale: "test scaffold policy".to_string(),
+        });
+        contributions.push(ComponentContribution {
+            file: file.clone(),
+            container,
+            component,
+            confidence: 0.75,
+            rationale: "test scaffold contribution".to_string(),
+            evidence: vec![EvidenceSpan {
+                file,
+                start_line: 1,
+                end_line: 1,
+                excerpt: None,
+                reason: "test scaffold evidence".to_string(),
+            }],
+        });
+    }
+    C4MappingPolicy {
+        purpose: "test scaffold".to_string(),
+        generated_at: Utc::now(),
+        provider: Some("test".to_string()),
+        model: Some("test-model".to_string()),
+        notes: None,
+        mappings,
+        contributions,
+        dependencies: vec![],
+        semantic_asts: vec![],
+    }
+}
+
 #[test]
 fn discovers_repository_and_maps_c4_tree() {
     let repo = make_repo();
     let repository = discover_repository(repo.path()).expect("discover");
-    let graph = map_repository_architecture(&repository).expect("map");
+    let policy = strict_smoke_policy(&repository);
+    let graph = map_repository_architecture_with_policy(&repository, &policy).expect("map");
 
     assert!(graph.nodes.values().any(|n| n.kind == NodeKind::System));
     assert!(graph.nodes.values().any(|n| n.kind == NodeKind::Container));
     assert!(graph.nodes.values().any(|n| n.kind == NodeKind::Component));
     assert!(graph.nodes.values().any(|n| n.kind == NodeKind::CodeUnit));
     graph.validate().expect("graph validates");
+}
+
+#[test]
+fn mapping_fails_on_non_utf8_source_file() {
+    let dir = TempDir::new().expect("temp dir");
+    fs::create_dir_all(dir.path().join("src")).expect("src dir");
+    fs::write(
+        dir.path().join("src/main.rs"),
+        [0_u8, 159_u8, 32_u8, 240_u8],
+    )
+    .expect("main");
+
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(dir.path())
+        .output()
+        .expect("git init");
+
+    let repository = discover_repository(dir.path()).expect("discover");
+    let policy = strict_smoke_policy(&repository);
+    let err =
+        map_repository_architecture_with_policy(&repository, &policy).expect_err("map should fail");
+    let message = err.to_string();
+    assert!(message.contains("src/main.rs"));
 }
 
 #[test]
@@ -70,7 +156,8 @@ fn query_mentions_resolve_and_return_references() {
 fn persists_graph_and_edit_log() {
     let repo = make_repo();
     let repository = discover_repository(repo.path()).expect("discover");
-    let graph = map_repository_architecture(&repository).expect("map");
+    let policy = strict_smoke_policy(&repository);
+    let graph = map_repository_architecture_with_policy(&repository, &policy).expect("map");
     let store = PersistenceStore::new(&repository.root).expect("store");
 
     store.save_graph(&graph).expect("save graph");
@@ -119,7 +206,8 @@ fn python_init_files_do_not_become_components() {
         .expect("git init");
 
     let repository = discover_repository(dir.path()).expect("discover");
-    let graph = map_repository_architecture(&repository).expect("map");
+    let policy = strict_smoke_policy(&repository);
+    let graph = map_repository_architecture_with_policy(&repository, &policy).expect("map");
     let component_names: Vec<String> = graph
         .nodes
         .values()
@@ -208,6 +296,7 @@ fn applies_llm_policy_mapping_for_component_grouping() {
                 }],
             },
         ],
+        dependencies: vec![],
         semantic_asts: vec![],
     };
     let graph = map_repository_architecture_with_policy(&repository, &policy).expect("map");
@@ -259,6 +348,7 @@ fn policy_mapping_rejects_missing_file_entries() {
             rationale: "package export".to_string(),
         }],
         contributions: vec![],
+        dependencies: vec![],
         semantic_asts: vec![],
     };
 
@@ -327,6 +417,7 @@ fn supports_multiple_component_contributions_from_single_file() {
                 }],
             },
         ],
+        dependencies: vec![],
         semantic_asts: vec![],
     };
 

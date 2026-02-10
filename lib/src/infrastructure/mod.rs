@@ -4,28 +4,42 @@ pub mod git;
 pub mod llm;
 pub mod mapping_policy;
 pub mod persistence;
+pub mod project_paths;
+pub mod project_store;
 pub mod repo_discovery;
+pub mod source_index;
 pub mod workspace;
 
 pub use cache::InferenceCache;
 pub use coverage::{parse_lcov, CoverageMap, CoverageStats};
 pub use git::{
-    blame_for_file, collect_git_signals, compare_branches, BranchDiffSummary, GitSignals,
+    blame_for_file, changed_files_between_tree_hashes, collect_git_signals, compare_branches,
+    head_tree_hash, BranchDiffSummary, GitSignals,
 };
 pub use llm::{
     provider_from_env, CompletionRequest, LlmCompletion, LlmProvider, ModelInfo, PromptTask,
     ProviderSelection, ResponseFormat,
 };
 pub use mapping_policy::{
-    collect_source_tree_snapshot, contributions_by_file, is_source_file, normalize_path,
-    parse_policy_response, policy_index, read_purpose_file, validate_policy,
-    validate_policy_evidence, C4MappingPolicy, ComponentContribution, EvidenceSpan,
-    FileMappingRule, FileSemanticAst, SemanticAstNode, SourceTreeSnapshot,
+    collect_source_tree_snapshot, contributions_by_file, is_first_pass_excluded_path,
+    is_first_pass_scope_file, is_source_file, normalize_path, parse_policy_response, policy_index,
+    read_purpose_file, validate_policy, validate_policy_evidence, C4MappingPolicy,
+    ComponentContribution, ComponentDependency, ComponentRef, EvidenceSpan, FileMappingRule,
+    FileSemanticAst, SemanticAstNode, SourceTreeSnapshot,
 };
 pub use persistence::PersistenceStore;
+pub use project_paths::{project_root, project_runtime_state_path, project_state_dir};
+pub use project_store::ProjectStore;
 pub use repo_discovery::{
     discover_repository, map_repository_architecture, map_repository_architecture_with_policy,
     map_repository_architecture_with_policy_and_progress,
+    map_repository_architecture_with_policy_and_progress_for_relative_files,
     map_repository_architecture_with_progress, RepoMapProgress,
 };
-pub use workspace::{load_workspace, merge_workspace_graphs};
+pub use source_index::{
+    load_source_index, save_source_index, SourceIndexDaemon, SourceIndexEntry, SourceIndexSnapshot,
+};
+pub use workspace::{
+    load_workspace, merge_workspace_graphs, merged_graph_for_active_repository,
+    upsert_workspace_repository_graph,
+};

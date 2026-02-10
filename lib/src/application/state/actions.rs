@@ -11,6 +11,7 @@ impl AppState {
     pub fn apply(&mut self, action: KeyAction) -> Result<()> {
         match self.mode {
             AppMode::Normal => self.apply_normal(action),
+            AppMode::Project => self.apply_project(action),
             AppMode::Search => self.apply_search(action),
             AppMode::Query => self.apply_query(action),
             AppMode::EditSummary => self.apply_edit_summary(action),
@@ -97,9 +98,14 @@ impl AppState {
                     self.mode = AppMode::EditSummary;
                 }
             }
-            KeyAction::Regenerate => self.start_regeneration(),
+            KeyAction::Regenerate => self.start_regeneration()?,
             KeyAction::ToggleHelp => {
                 self.mode = AppMode::Help;
+            }
+            KeyAction::ToggleProjectView => {
+                self.mode = AppMode::Project;
+                self.status_line =
+                    "Project view: o queue | c cancel | R retry | s switch".to_string();
             }
             KeyAction::ShowHistory => {
                 self.mode = AppMode::History;
@@ -117,6 +123,26 @@ impl AppState {
             }
             KeyAction::Cancel => {
                 self.should_quit = true;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn apply_project(&mut self, action: KeyAction) -> Result<()> {
+        match action {
+            KeyAction::Up => self.move_project_selection(-1),
+            KeyAction::Down => self.move_project_selection(1),
+            KeyAction::PageUp => self.move_project_selection(-8),
+            KeyAction::PageDown => self.move_project_selection(8),
+            KeyAction::QueueOnboarding => self.queue_selected_project_repository(),
+            KeyAction::CancelOnboarding => self.cancel_selected_project_repository(),
+            KeyAction::RetryOnboarding => self.retry_selected_project_repository(),
+            KeyAction::SwitchRepository | KeyAction::Accept => {
+                self.switch_to_selected_project_repository()?;
+            }
+            KeyAction::ToggleProjectView | KeyAction::Cancel | KeyAction::Back => {
+                self.mode = AppMode::Normal;
             }
             _ => {}
         }
@@ -285,36 +311,11 @@ impl AppState {
                     self.mode = AppMode::Normal;
                     return Ok(());
                 };
-                if let Some((summary, confidence, source)) =
-                    self.inference.regenerate_node(&self.graph, &node_id)
-                {
-                    if let Some(node) = self.graph.node_mut(&node_id) {
-                        let before = node.summary.clone();
-                        node.summary = summary.clone();
-                        node.provenance = Provenance {
-                            source: ProvenanceSource::Ai,
-                            author: None,
-                            reason: Some(format!("Regenerated via {source}")),
-                            edited_at: Some(Utc::now()),
-                        };
-                        node.confidence = confidence;
-                        node.last_analyzed = Some(Utc::now());
-
-                        let entry = EditLogEntry {
-                            timestamp: Utc::now(),
-                            author: self.author.clone(),
-                            component_path: node_id.clone(),
-                            field: "summary".to_string(),
-                            before,
-                            after: summary,
-                            reason: Some(format!("Regenerate summary ({source})")),
-                            provenance: node.provenance.clone(),
-                        };
-                        self.persistence.append_edit(&entry)?;
-                    }
+                if let Some(source) = self.regenerate_selected_node(&node_id)? {
+                    self.status_line = format!("Summary regenerated ({source})");
+                } else {
+                    self.status_line = "Summary regeneration skipped".to_string();
                 }
-                self.persistence.save_graph(&self.graph)?;
-                self.status_line = "Summary regenerated".to_string();
                 self.mode = AppMode::Normal;
             }
             KeyAction::Cancel => {
@@ -351,31 +352,63 @@ impl AppState {
         Ok(())
     }
 
-    fn start_regeneration(&mut self) {
+    fn start_regeneration(&mut self) -> Result<()> {
         let Some(node) = self.selected_node() else {
-            return;
+            return Ok(());
         };
 
         if node.provenance.source == ProvenanceSource::Human {
             self.mode = AppMode::ConfirmRegenerate;
             self.status_line =
                 "Node was human-edited. Press Enter to confirm regeneration".to_string();
-            return;
+            return Ok(());
         }
 
         if let Some(id) = self.selected_node_id().map(ToString::to_string) {
-            if let Some((summary, confidence, source)) =
-                self.inference.regenerate_node(&self.graph, &id)
-            {
-                if let Some(node) = self.graph.node_mut(&id) {
-                    node.summary = summary;
-                    node.provenance = Provenance::ai();
-                    node.confidence = confidence;
-                    node.last_analyzed = Some(Utc::now());
-                    self.status_line = format!("Summary regenerated ({source})");
-                }
+            if let Some(source) = self.regenerate_selected_node(&id)? {
+                self.status_line = format!("Summary regenerated ({source})");
+            } else {
+                self.status_line = "Summary regeneration skipped".to_string();
             }
         }
+        Ok(())
+    }
+
+    fn regenerate_selected_node(&mut self, node_id: &str) -> Result<Option<&'static str>> {
+        let Some((summary, confidence, source)) =
+            self.inference.regenerate_node(&self.graph, node_id)
+        else {
+            return Ok(None);
+        };
+        let Some(node) = self.graph.node_mut(node_id) else {
+            return Ok(None);
+        };
+
+        let before = node.summary.clone();
+        node.summary = summary.clone();
+        node.provenance = Provenance {
+            source: ProvenanceSource::Ai,
+            author: None,
+            reason: Some(format!("Regenerated via {source}")),
+            edited_at: Some(Utc::now()),
+        };
+        node.confidence = confidence;
+        node.last_analyzed = Some(Utc::now());
+
+        let entry = EditLogEntry {
+            timestamp: Utc::now(),
+            author: self.author.clone(),
+            component_path: node_id.to_string(),
+            field: "summary".to_string(),
+            before,
+            after: summary,
+            reason: Some(format!("Regenerate summary ({source})")),
+            provenance: node.provenance.clone(),
+        };
+        self.persistence.append_edit(&entry)?;
+        self.persistence.save_graph(&self.graph)?;
+
+        Ok(Some(source))
     }
 
     fn reason_buffer_to_option(&self) -> Option<String> {

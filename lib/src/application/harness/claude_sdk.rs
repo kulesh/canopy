@@ -272,7 +272,7 @@ fn output_schema_for_request(request: &CompletionRequest) -> Option<Value> {
 fn mapping_policy_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["mappings", "contributions"],
+        "required": ["mappings", "contributions", "dependencies"],
         "additionalProperties": false,
         "properties": {
             "notes": {"type": "string"},
@@ -320,6 +320,36 @@ fn mapping_policy_schema() -> Value {
                                 }
                             }
                         }
+                    }
+                }
+            },
+            "dependencies": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["from", "to", "confidence", "rationale"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "from": {
+                            "type": "object",
+                            "required": ["container", "component"],
+                            "additionalProperties": false,
+                            "properties": {
+                                "container": {"type": "string", "minLength": 1},
+                                "component": {"type": "string", "minLength": 1}
+                            }
+                        },
+                        "to": {
+                            "type": "object",
+                            "required": ["container", "component"],
+                            "additionalProperties": false,
+                            "properties": {
+                                "container": {"type": "string", "minLength": 1},
+                                "component": {"type": "string", "minLength": 1}
+                            }
+                        },
+                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                        "rationale": {"type": "string", "minLength": 1}
                     }
                 }
             },

@@ -11,7 +11,9 @@ Persist under repository-local `.canopy/`:
 - `c4_model.json`
 - `edit_log.jsonl`
 - `query_history.jsonl`
+- `mapping_policy.json`
 - `cache.db` (SQLite)
+- `logs/diagnostics.jsonl`
 
 `edit_log.jsonl` is append-only and stores timestamp, author, component path, before/after, reason, and provenance.
 

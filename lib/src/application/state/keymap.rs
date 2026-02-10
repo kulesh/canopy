@@ -1,3 +1,5 @@
+use super::AppMode;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAction {
     Up,
@@ -15,6 +17,11 @@ pub enum KeyAction {
     Regenerate,
     ToggleGraph,
     ToggleImpact,
+    ToggleProjectView,
+    QueueOnboarding,
+    CancelOnboarding,
+    RetryOnboarding,
+    SwitchRepository,
     ShowHistory,
     Export,
     NextPane,
@@ -28,7 +35,11 @@ pub enum KeyAction {
     Noop,
 }
 
-pub fn map_key_to_action(key: crossterm::event::KeyEvent, pending_g: bool) -> (KeyAction, bool) {
+pub fn map_key_to_action(
+    key: crossterm::event::KeyEvent,
+    pending_g: bool,
+    mode: AppMode,
+) -> (KeyAction, bool) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -55,6 +66,13 @@ pub fn map_key_to_action(key: crossterm::event::KeyEvent, pending_g: bool) -> (K
         KeyCode::Char('r') => KeyAction::Regenerate,
         KeyCode::Char('v') => KeyAction::ToggleGraph,
         KeyCode::Char('i') => KeyAction::ToggleImpact,
+        KeyCode::Char('P') if matches!(mode, AppMode::Normal | AppMode::Project) => {
+            KeyAction::ToggleProjectView
+        }
+        KeyCode::Char('o') if mode == AppMode::Project => KeyAction::QueueOnboarding,
+        KeyCode::Char('c') if mode == AppMode::Project => KeyAction::CancelOnboarding,
+        KeyCode::Char('R') if mode == AppMode::Project => KeyAction::RetryOnboarding,
+        KeyCode::Char('s') if mode == AppMode::Project => KeyAction::SwitchRepository,
         KeyCode::Char('H') => KeyAction::ShowHistory,
         KeyCode::Char('X') => KeyAction::Export,
         KeyCode::Char('g') => {

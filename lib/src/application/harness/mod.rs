@@ -1,58 +1,21 @@
-use std::collections::VecDeque;
-
-use async_trait::async_trait;
-use serde::Deserialize;
-use tracing::{debug, info, warn};
+use tracing::warn;
 
 use crate::domain::Repository;
-use crate::error::{CanopyError, Result};
-use crate::inference::prompt::{
-    mapping_policy_repair_request, mapping_policy_request, mapping_policy_verification_request,
-};
-use crate::infrastructure::{
-    collect_source_tree_snapshot, parse_policy_response, validate_policy_evidence, C4MappingPolicy,
-    LlmProvider, SourceTreeSnapshot,
-};
+use crate::error::Result;
+use crate::inference::prompt::mapping_policy_verification_request;
+use crate::infrastructure::{C4MappingPolicy, LlmProvider, SourceTreeSnapshot};
 
 mod claude_sdk;
+mod llm_adapter;
+mod parsing;
+mod types;
+
 use claude_sdk::{ClaudeSdkExecutor, ClaudeSdkHarnessAdapter};
+pub use llm_adapter::LlmHarnessAdapter;
+use parsing::PolicyVerificationVerdict;
+pub use types::{HarnessAdapter, HarnessConfig, HarnessProgressEvent};
 
-#[derive(Debug, Clone)]
-pub struct HarnessConfig {
-    pub max_attempts: usize,
-    pub max_files_in_prompt: usize,
-    pub enforce_model_verification: bool,
-}
-
-impl Default for HarnessConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: 3,
-            max_files_in_prompt: 1_200,
-            enforce_model_verification: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum HarnessProgressEvent {
-    Phase { label: &'static str, percent: u8 },
-    AttemptStart { current: usize, total: usize },
-    ToolCall { tool: String, input_summary: String },
-    ToolResult { tool: String, is_error: bool },
-    Verification { percent: u8 },
-    RepairRequested { reason: String, percent: u8 },
-    Completed { provider: String, model: String },
-}
-
-#[async_trait(?Send)]
-pub trait HarnessAdapter {
-    async fn generate_mapping_policy(
-        &self,
-        repository: &Repository,
-        purpose: &str,
-    ) -> Result<Option<C4MappingPolicy>>;
-}
+pub(crate) use parsing::{extract_json_object, summarize_issues};
 
 pub async fn generate_mapping_policy(
     repository: &Repository,
@@ -95,194 +58,7 @@ where
     }
 }
 
-pub struct LlmHarnessAdapter<'a> {
-    provider: Option<&'a dyn LlmProvider>,
-    config: HarnessConfig,
-}
-
-impl<'a> LlmHarnessAdapter<'a> {
-    pub fn new(provider: Option<&'a dyn LlmProvider>) -> Self {
-        Self {
-            provider,
-            config: HarnessConfig::default(),
-        }
-    }
-
-    pub fn with_config(mut self, config: HarnessConfig) -> Self {
-        self.config = config;
-        self
-    }
-
-    async fn generate_mapping_policy_with_progress(
-        &self,
-        repository: &Repository,
-        purpose: &str,
-        on_progress: &mut dyn FnMut(HarnessProgressEvent),
-    ) -> Result<Option<C4MappingPolicy>> {
-        let Some(provider) = self.provider else {
-            return Ok(None);
-        };
-
-        on_progress(HarnessProgressEvent::Phase {
-            label: "Collecting source tree snapshot",
-            percent: 10,
-        });
-        let snapshot = collect_source_tree_snapshot(repository)?;
-        if snapshot.files.is_empty() {
-            return Ok(None);
-        }
-
-        let model_info = provider.model_info();
-        let mut request =
-            mapping_policy_request(&snapshot, purpose, self.config.max_files_in_prompt);
-        let mut last_error = String::new();
-
-        for attempt in 1..=self.config.max_attempts {
-            on_progress(HarnessProgressEvent::AttemptStart {
-                current: attempt,
-                total: self.config.max_attempts,
-            });
-            on_progress(HarnessProgressEvent::Phase {
-                label: "Generating mapping policy",
-                percent: 30,
-            });
-            info!(
-                repo = %repository.root.display(),
-                attempt,
-                max_attempts = self.config.max_attempts,
-                "generating mapping policy"
-            );
-
-            let completion = provider.complete(&request).await?;
-            let maybe_policy = parse_policy_response(purpose, &completion.text, Some(&model_info))
-                .and_then(|policy| {
-                    validate_policy_evidence(&repository.root, &snapshot, &policy)?;
-                    Ok(policy)
-                });
-
-            let policy = match maybe_policy {
-                Ok(policy) => policy,
-                Err(err) => {
-                    last_error = err.to_string();
-                    if attempt == self.config.max_attempts {
-                        return Err(err);
-                    }
-                    on_progress(HarnessProgressEvent::RepairRequested {
-                        reason: last_error.clone(),
-                        percent: 45,
-                    });
-                    warn!(
-                        repo = %repository.root.display(),
-                        attempt,
-                        error = %last_error,
-                        "mapping policy failed structural verification; requesting repair"
-                    );
-                    request = mapping_policy_repair_request(
-                        &snapshot,
-                        purpose,
-                        self.config.max_files_in_prompt,
-                        &completion.text,
-                        &last_error,
-                    );
-                    continue;
-                }
-            };
-
-            if !self.config.enforce_model_verification {
-                on_progress(HarnessProgressEvent::Completed {
-                    provider: model_info.provider,
-                    model: model_info.model,
-                });
-                return Ok(Some(policy));
-            }
-
-            on_progress(HarnessProgressEvent::Verification { percent: 75 });
-            match verify_policy_with_model(
-                provider,
-                &snapshot,
-                purpose,
-                &policy,
-                self.config.max_files_in_prompt,
-            )
-            .await
-            {
-                Ok(verdict) if verdict.valid => {
-                    on_progress(HarnessProgressEvent::Completed {
-                        provider: model_info.provider,
-                        model: model_info.model,
-                    });
-                    return Ok(Some(policy));
-                }
-                Ok(verdict) => {
-                    let issues = summarize_issues(&verdict.issues);
-                    last_error = format!("policy verifier rejected mapping: {issues}");
-                    if attempt == self.config.max_attempts {
-                        return Err(CanopyError::Validation(last_error));
-                    }
-                    on_progress(HarnessProgressEvent::RepairRequested {
-                        reason: last_error.clone(),
-                        percent: 82,
-                    });
-                    debug!(
-                        repo = %repository.root.display(),
-                        attempt,
-                        issues = %issues,
-                        "policy verifier requested mapping repair"
-                    );
-                    request = mapping_policy_repair_request(
-                        &snapshot,
-                        purpose,
-                        self.config.max_files_in_prompt,
-                        &completion.text,
-                        &last_error,
-                    );
-                }
-                Err(err) => {
-                    last_error = format!("policy verification failed: {err}");
-                    if attempt == self.config.max_attempts {
-                        return Err(err);
-                    }
-                    on_progress(HarnessProgressEvent::RepairRequested {
-                        reason: last_error.clone(),
-                        percent: 82,
-                    });
-                    warn!(
-                        repo = %repository.root.display(),
-                        attempt,
-                        error = %last_error,
-                        "policy verifier failed; requesting repaired policy"
-                    );
-                    request = mapping_policy_repair_request(
-                        &snapshot,
-                        purpose,
-                        self.config.max_files_in_prompt,
-                        &completion.text,
-                        &last_error,
-                    );
-                }
-            }
-        }
-
-        Err(CanopyError::Llm(format!(
-            "mapping policy generation exhausted attempts: {last_error}"
-        )))
-    }
-}
-
-#[async_trait(?Send)]
-impl<'a> HarnessAdapter for LlmHarnessAdapter<'a> {
-    async fn generate_mapping_policy(
-        &self,
-        repository: &Repository,
-        purpose: &str,
-    ) -> Result<Option<C4MappingPolicy>> {
-        let mut noop = |_| {};
-        self.generate_mapping_policy_with_progress(repository, purpose, &mut noop)
-            .await
-    }
-}
-
-async fn verify_policy_with_executor(
+pub(crate) async fn verify_policy_with_executor(
     executor: &dyn ClaudeSdkExecutor,
     repository: &Repository,
     snapshot: &SourceTreeSnapshot,
@@ -294,65 +70,7 @@ async fn verify_policy_with_executor(
     let request =
         mapping_policy_verification_request(snapshot, purpose, policy, max_files_in_prompt);
     let response = executor.complete(&request, repository, on_progress).await?;
-    parse_verification_response(&response)
-}
-
-async fn verify_policy_with_model(
-    provider: &dyn LlmProvider,
-    snapshot: &SourceTreeSnapshot,
-    purpose: &str,
-    policy: &C4MappingPolicy,
-    max_files_in_prompt: usize,
-) -> Result<PolicyVerificationVerdict> {
-    let request =
-        mapping_policy_verification_request(snapshot, purpose, policy, max_files_in_prompt);
-    let completion = provider.complete(&request).await?;
-    parse_verification_response(&completion.text)
-}
-
-#[derive(Debug, Deserialize)]
-struct PolicyVerificationVerdict {
-    valid: bool,
-    #[serde(default)]
-    issues: Vec<String>,
-}
-
-fn summarize_issues(issues: &[String]) -> String {
-    if issues.is_empty() {
-        return "no issues provided".to_string();
-    }
-    let mut list: VecDeque<String> = issues.iter().cloned().collect();
-    list.make_contiguous().sort();
-    list.into_iter().take(3).collect::<Vec<_>>().join(" | ")
-}
-
-fn parse_verification_response(raw: &str) -> Result<PolicyVerificationVerdict> {
-    let json = extract_json_object(raw).ok_or_else(|| {
-        CanopyError::Validation(
-            "policy verification response did not contain valid JSON".to_string(),
-        )
-    })?;
-    let verdict: PolicyVerificationVerdict = serde_json::from_str(&json)?;
-    Ok(verdict)
-}
-
-fn extract_json_object(raw: &str) -> Option<String> {
-    let stripped = raw
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-    if stripped.starts_with('{') && stripped.ends_with('}') {
-        return Some(stripped.to_string());
-    }
-
-    let start = stripped.find('{')?;
-    let end = stripped.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    Some(stripped[start..=end].to_string())
+    parsing::parse_verification_response(&response)
 }
 
 #[cfg(test)]
@@ -364,6 +82,7 @@ mod tests {
     use async_trait::async_trait;
     use tempfile::TempDir;
 
+    use crate::error::CanopyError;
     use crate::infrastructure::{CompletionRequest, LlmCompletion, ModelInfo, PromptTask};
 
     use super::*;
@@ -482,6 +201,7 @@ mod tests {
                     {"file":"src/main.rs","container":"src","component":"entrypoint","confidence":0.95,"rationale":"entrypoint behavior","evidence":[{"file":"src/main.rs","start_line":1,"end_line":1,"excerpt":"fn main","reason":"main function orchestrates startup"}]},
                     {"file":"src/api.rs","container":"src","component":"api_runtime","confidence":0.95,"rationale":"api behavior","evidence":[{"file":"src/api.rs","start_line":1,"end_line":1,"excerpt":"fn run","reason":"runtime API behavior"}]}
                 ],
+                "dependencies":[],
                 "semantic_asts":[]
             }"#
             .to_string(),
@@ -525,6 +245,7 @@ mod tests {
                         {"file":"src/main.rs","container":"app","component":"entrypoint","confidence":0.92,"rationale":"entrypoint behavior","evidence":[{"file":"src/main.rs","start_line":1,"end_line":1,"excerpt":"fn main","reason":"main function orchestrates startup"}]},
                         {"file":"src/api.rs","container":"app","component":"api_runtime","confidence":0.95,"rationale":"api behavior","evidence":[{"file":"src/api.rs","start_line":1,"end_line":1,"excerpt":"fn run","reason":"runtime API behavior"}]}
                     ],
+                    "dependencies":[],
                     "semantic_asts":[]
                 }"#
                 .to_string(),
@@ -561,6 +282,7 @@ mod tests {
                         {"file":"src/main.rs","container":"app","component":"entrypoint","confidence":0.92,"rationale":"entrypoint behavior","evidence":[{"file":"src/main.rs","start_line":1,"end_line":1,"excerpt":"fn main","reason":"main function orchestrates startup"}]},
                         {"file":"src/api.rs","container":"app","component":"api_runtime","confidence":0.93,"rationale":"api behavior","evidence":[{"file":"src/api.rs","start_line":1,"end_line":1,"excerpt":"fn run","reason":"runtime API behavior"}]}
                     ],
+                    "dependencies":[],
                     "semantic_asts":[]
                 }"#
                 .to_string(),
@@ -580,6 +302,7 @@ mod tests {
                         {"file":"src/main.rs","container":"src","component":"entrypoint","confidence":0.95,"rationale":"entrypoint behavior","evidence":[{"file":"src/main.rs","start_line":1,"end_line":1,"excerpt":"fn main","reason":"main function orchestrates startup"}]},
                         {"file":"src/api.rs","container":"src","component":"api_runtime","confidence":0.95,"rationale":"api behavior","evidence":[{"file":"src/api.rs","start_line":1,"end_line":1,"excerpt":"fn run","reason":"runtime API behavior"}]}
                     ],
+                    "dependencies":[],
                     "semantic_asts":[]
                 }"#
                 .to_string(),
@@ -619,6 +342,7 @@ mod tests {
                         {"file":"src/main.rs","container":"src","component":"entrypoint","confidence":0.95,"rationale":"entrypoint behavior","evidence":[{"file":"src/main.rs","start_line":1,"end_line":1,"excerpt":"fn main","reason":"main function orchestrates startup"}]},
                         {"file":"src/api.rs","container":"src","component":"api_runtime","confidence":0.95,"rationale":"api behavior","evidence":[{"file":"src/api.rs","start_line":1,"end_line":1,"excerpt":"fn run","reason":"runtime API behavior"}]}
                     ],
+                    "dependencies":[],
                     "semantic_asts":[]
                 }"#
                 .to_string(),

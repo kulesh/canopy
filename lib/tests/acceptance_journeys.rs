@@ -3,9 +3,11 @@ use std::path::PathBuf;
 
 use canopy_lib::application::{AppMode, AppState, KeyAction};
 use canopy_lib::domain::{ArchitectureGraph, ArchitectureNode, NodeKind, Repository};
-use canopy_lib::inference::InferenceEngine;
+use canopy_lib::inference::{InferenceEngine, InferenceExecutionMode};
 use canopy_lib::infrastructure::{
-    discover_repository, map_repository_architecture, InferenceCache, PersistenceStore,
+    collect_source_tree_snapshot, discover_repository, map_repository_architecture_with_policy,
+    C4MappingPolicy, ComponentContribution, EvidenceSpan, FileMappingRule, InferenceCache,
+    PersistenceStore,
 };
 use tempfile::TempDir;
 
@@ -23,6 +25,51 @@ fn make_repo() -> TempDir {
     fs::write(dir.path().join("src/main.rs"), "fn main() {}").expect("main");
     init_git(dir.path());
     dir
+}
+
+fn strict_smoke_policy(repository: &Repository) -> C4MappingPolicy {
+    let snapshot = collect_source_tree_snapshot(repository).expect("snapshot");
+    let mappings = snapshot
+        .files
+        .iter()
+        .map(|file| FileMappingRule {
+            file: file.clone(),
+            include: true,
+            container: Some("src".to_string()),
+            component: Some("main".to_string()),
+            confidence: 0.8,
+            rationale: "test scaffold".to_string(),
+        })
+        .collect::<Vec<_>>();
+    let contributions = snapshot
+        .files
+        .iter()
+        .map(|file| ComponentContribution {
+            file: file.clone(),
+            container: "src".to_string(),
+            component: "main".to_string(),
+            confidence: 0.8,
+            rationale: "test scaffold".to_string(),
+            evidence: vec![EvidenceSpan {
+                file: file.clone(),
+                start_line: 1,
+                end_line: 1,
+                excerpt: None,
+                reason: "test scaffold evidence".to_string(),
+            }],
+        })
+        .collect::<Vec<_>>();
+    C4MappingPolicy {
+        purpose: "test scaffold".to_string(),
+        generated_at: chrono::Utc::now(),
+        provider: Some("test".to_string()),
+        model: Some("test-model".to_string()),
+        notes: None,
+        mappings,
+        contributions,
+        dependencies: vec![],
+        semantic_asts: vec![],
+    }
 }
 
 fn sample_state() -> AppState {
@@ -67,10 +114,11 @@ fn sample_state() -> AppState {
     }
 
     let cache = InferenceCache::open(&repo.canopy_dir().join("cache.db")).expect("cache");
-    let inference = InferenceEngine::new(
+    let inference = InferenceEngine::new_with_mode(
         None,
         cache,
         "Understand repository architecture".to_string(),
+        InferenceExecutionMode::HybridFallback,
     );
     AppState::new(repo, persistence, graph, inference, "tester".to_string())
 }
@@ -79,7 +127,8 @@ fn sample_state() -> AppState {
 fn given_repository_when_mapped_then_c4_layers_exist() {
     let repo = make_repo();
     let discovered = discover_repository(repo.path()).expect("discover");
-    let graph = map_repository_architecture(&discovered).expect("map");
+    let policy = strict_smoke_policy(&discovered);
+    let graph = map_repository_architecture_with_policy(&discovered, &policy).expect("map");
 
     assert!(graph.nodes.values().any(|n| n.kind == NodeKind::System));
     assert!(graph.nodes.values().any(|n| n.kind == NodeKind::Container));
@@ -118,4 +167,46 @@ fn given_export_confirmation_when_accept_then_export_file_created() {
 
     let export_path = state.persistence.canopy_dir.join("edit_log_export.json");
     assert!(export_path.exists());
+}
+
+#[test]
+fn given_non_human_regenerate_when_triggered_then_persists_and_audits() {
+    let mut state = sample_state();
+    state.jump_to("component:src:main");
+
+    let before = state
+        .graph
+        .node("component:src:main")
+        .map(|node| node.summary.clone())
+        .expect("component");
+    assert_eq!(before, "old summary");
+
+    state.apply(KeyAction::Regenerate).expect("regenerate");
+
+    let edits = state.persistence.read_edits().expect("edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].component_path, "component:src:main");
+    assert!(edits[0]
+        .reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Regenerate summary"));
+
+    let persisted = state
+        .persistence
+        .load_graph()
+        .expect("load graph")
+        .expect("graph");
+    let current_summary = state
+        .graph
+        .node("component:src:main")
+        .map(|node| node.summary.clone())
+        .expect("component");
+    let persisted_summary = persisted
+        .node("component:src:main")
+        .map(|node| node.summary.clone())
+        .expect("component");
+
+    assert_ne!(current_summary, before);
+    assert_eq!(persisted_summary, current_summary);
 }

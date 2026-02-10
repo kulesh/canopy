@@ -5,12 +5,23 @@ mod keymap;
 mod navigation;
 
 use std::collections::HashSet;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
+use crate::application::project::{
+    reduce_event as reduce_project_event, ProjectCommand, ProjectEvent,
+};
 use crate::domain::graph::{Provenance, ProvenanceSource};
-use crate::domain::{ArchitectureGraph, NodeKind, QueryAnswer, Repository};
-use crate::inference::{InferenceEngine, InferenceProgress};
-use crate::infrastructure::{CoverageMap, GitSignals, PersistenceStore};
+use crate::domain::{
+    ArchitectureGraph, NodeKind, OnboardingPhase, Project, ProjectMappingExecutionMode,
+    ProjectRepository, ProjectRuntimeState, QueryAnswer, Repository,
+};
+use crate::error::CanopyError;
+use crate::inference::{InferenceEngine, InferenceExecutionMode, InferenceProgress};
+use crate::infrastructure::{
+    discover_repository, provider_from_env, CoverageMap, GitSignals, InferenceCache,
+    PersistenceStore,
+};
 use chrono::Utc;
 
 pub use analysis::{node_code_path, render_edit_history, require_graph};
@@ -19,6 +30,7 @@ pub use keymap::{map_key_to_action, KeyAction};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Normal,
+    Project,
     Search,
     Query,
     EditSummary,
@@ -54,6 +66,53 @@ impl FocusPane {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ProjectSessionState {
+    pub manifest_path: PathBuf,
+    pub project: Project,
+    pub runtime_state: ProjectRuntimeState,
+    pub selected_repository_index: usize,
+    pub active_repository_id: Option<String>,
+    pub purpose: String,
+}
+
+impl ProjectSessionState {
+    pub fn selected_repository(&self) -> Option<&ProjectRepository> {
+        self.project
+            .repositories
+            .get(self.selected_repository_index)
+    }
+
+    pub fn selected_repository_id(&self) -> Option<&str> {
+        self.selected_repository()
+            .map(|repository| repository.id.as_str())
+    }
+
+    pub fn selected_repository_phase(&self) -> Option<OnboardingPhase> {
+        let repository_id = self.selected_repository_id()?;
+        self.runtime_state
+            .repositories
+            .get(repository_id)
+            .map(|state| state.phase)
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        if self.project.repositories.is_empty() {
+            self.selected_repository_index = 0;
+            return;
+        }
+        let max = self.project.repositories.len() - 1;
+        if delta.is_negative() {
+            self.selected_repository_index = self
+                .selected_repository_index
+                .saturating_sub(delta.unsigned_abs());
+        } else {
+            self.selected_repository_index =
+                (self.selected_repository_index + delta as usize).min(max);
+        }
+    }
+}
+
 pub struct AppState {
     pub repository: Repository,
     pub persistence: PersistenceStore,
@@ -80,6 +139,9 @@ pub struct AppState {
     pub inference: InferenceEngine,
     pub inference_events: Option<Receiver<InferenceProgress>>,
     pub inference_running: bool,
+    pub project: Option<ProjectSessionState>,
+    pub project_events: Option<Receiver<ProjectEvent>>,
+    pub project_commands: Option<Sender<ProjectCommand>>,
     pub author: String,
     pub query_history_cursor: Option<usize>,
 }
@@ -92,24 +154,13 @@ impl AppState {
         inference: InferenceEngine,
         author: String,
     ) -> Self {
-        let root_id = graph.root_id.clone();
-        let mut collapsed = HashSet::new();
-        for node in graph.nodes.values() {
-            if node.id != root_id
-                && !node.children.is_empty()
-                && matches!(node.kind, NodeKind::Container | NodeKind::Component)
-            {
-                collapsed.insert(node.id.clone());
-            }
-        }
-
         let mut state = Self {
             repository,
             persistence,
             graph,
             visible: Vec::new(),
             selected_index: 0,
-            collapsed,
+            collapsed: HashSet::new(),
             mode: AppMode::Normal,
             input_buffer: String::new(),
             edit_buffer: String::new(),
@@ -129,11 +180,29 @@ impl AppState {
             inference,
             inference_events: None,
             inference_running: false,
+            project: None,
+            project_events: None,
+            project_commands: None,
             author,
             query_history_cursor: None,
         };
+        state.collapsed = Self::collapsed_nodes_for_graph(&state.graph);
         state.refresh_visible();
         state
+    }
+
+    fn collapsed_nodes_for_graph(graph: &ArchitectureGraph) -> HashSet<String> {
+        let root_id = graph.root_id.clone();
+        let mut collapsed = HashSet::new();
+        for node in graph.nodes.values() {
+            if node.id != root_id
+                && !node.children.is_empty()
+                && matches!(node.kind, NodeKind::Container | NodeKind::Component)
+            {
+                collapsed.insert(node.id.clone());
+            }
+        }
+        collapsed
     }
 
     pub fn selected_node_id(&self) -> Option<&str> {
@@ -214,6 +283,279 @@ impl AppState {
                     self.inference_events = None;
                     break;
                 }
+            }
+        }
+    }
+
+    pub fn attach_project_events(&mut self, rx: Receiver<ProjectEvent>) {
+        self.project_events = Some(rx);
+    }
+
+    pub fn attach_project_commands(&mut self, tx: Sender<ProjectCommand>) {
+        self.project_commands = Some(tx);
+    }
+
+    pub fn configure_project(
+        &mut self,
+        project: Project,
+        runtime_state: ProjectRuntimeState,
+        manifest_path: PathBuf,
+        active_repository_id: String,
+        purpose: String,
+    ) {
+        let selected_repository_index = project
+            .repositories
+            .iter()
+            .position(|repository| repository.id == active_repository_id)
+            .unwrap_or(0);
+        self.project = Some(ProjectSessionState {
+            manifest_path,
+            project,
+            runtime_state,
+            selected_repository_index,
+            active_repository_id: Some(active_repository_id),
+            purpose,
+        });
+    }
+
+    pub fn poll_project_events(&mut self) {
+        let Some(rx) = &self.project_events else {
+            return;
+        };
+
+        let mut buffered_events = Vec::new();
+        let mut disconnected = false;
+        loop {
+            match rx.try_recv() {
+                Ok(event) => buffered_events.push(event),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        if disconnected {
+            self.project_events = None;
+        }
+
+        for event in buffered_events {
+            let mut ready_active_repository = None::<String>;
+            if let Some(project) = &mut self.project {
+                reduce_project_event(&mut project.runtime_state, &event);
+                if let ProjectEvent::ActiveRepositoryChanged { repository_id } = &event {
+                    project.active_repository_id = Some(repository_id.clone());
+                }
+                if let ProjectEvent::RepositoryReady { repository_id, .. } = &event {
+                    if project.active_repository_id.as_deref() == Some(repository_id) {
+                        ready_active_repository = Some(repository_id.clone());
+                    }
+                }
+            }
+            if let Some(repository_id) = ready_active_repository {
+                if let Err(err) = self.switch_to_project_repository_by_id(&repository_id, false) {
+                    self.status_line = format!(
+                        "{} | unable to load ready repository: {}",
+                        self.project_event_summary(&event),
+                        err
+                    );
+                    continue;
+                }
+            }
+            self.status_line = self.project_event_summary(&event);
+        }
+    }
+
+    pub fn selected_project_repository(&self) -> Option<&ProjectRepository> {
+        self.project.as_ref()?.selected_repository()
+    }
+
+    pub fn selected_project_repository_id(&self) -> Option<&str> {
+        self.project.as_ref()?.selected_repository_id()
+    }
+
+    pub fn selected_project_repository_phase(&self) -> Option<OnboardingPhase> {
+        self.project.as_ref()?.selected_repository_phase()
+    }
+
+    pub fn move_project_selection(&mut self, delta: isize) {
+        if let Some(project) = &mut self.project {
+            project.move_selection(delta);
+        }
+    }
+
+    pub fn queue_selected_project_repository(&mut self) {
+        let Some(repository_id) = self.selected_project_repository_id().map(str::to_string) else {
+            return;
+        };
+        if let Some(tx) = &self.project_commands {
+            let _ = tx.send(ProjectCommand::QueueRepository {
+                repository_id: repository_id.clone(),
+            });
+            self.status_line = format!("{repository_id}: queue requested");
+        }
+    }
+
+    pub fn cancel_selected_project_repository(&mut self) {
+        let Some(repository_id) = self.selected_project_repository_id().map(str::to_string) else {
+            return;
+        };
+        if let Some(tx) = &self.project_commands {
+            let _ = tx.send(ProjectCommand::CancelRepository {
+                repository_id: repository_id.clone(),
+            });
+            self.status_line = format!("{repository_id}: cancel requested");
+        }
+    }
+
+    pub fn retry_selected_project_repository(&mut self) {
+        let Some(repository_id) = self.selected_project_repository_id().map(str::to_string) else {
+            return;
+        };
+        if let Some(tx) = &self.project_commands {
+            let _ = tx.send(ProjectCommand::RetryRepository {
+                repository_id: repository_id.clone(),
+            });
+            self.status_line = format!("{repository_id}: retry requested");
+        }
+    }
+
+    pub fn switch_to_selected_project_repository(&mut self) -> crate::error::Result<()> {
+        let Some(repository_id) = self.selected_project_repository_id().map(str::to_string) else {
+            return Ok(());
+        };
+        self.switch_to_project_repository_by_id(&repository_id, true)
+    }
+
+    fn switch_to_project_repository_by_id(
+        &mut self,
+        repository_id: &str,
+        notify_scheduler: bool,
+    ) -> crate::error::Result<()> {
+        let (path, name, phase, purpose) = {
+            let Some(project) = self.project.as_ref() else {
+                return Ok(());
+            };
+            let Some(repository) = project
+                .project
+                .repositories
+                .iter()
+                .find(|repository| repository.id == repository_id)
+            else {
+                return Err(CanopyError::Validation(format!(
+                    "project repository '{}' not found",
+                    repository_id
+                )));
+            };
+            let phase = project
+                .runtime_state
+                .repositories
+                .get(&repository.id)
+                .map(|state| state.phase)
+                .unwrap_or(OnboardingPhase::NotStarted);
+            (
+                repository.path.clone(),
+                repository.name.clone(),
+                phase,
+                project.purpose.clone(),
+            )
+        };
+
+        if phase != OnboardingPhase::Ready {
+            self.status_line = format!("{name} is not ready yet");
+            return Ok(());
+        }
+
+        let repository = discover_repository(&path)?;
+        let persistence = PersistenceStore::new(&repository.root)?;
+        let graph = persistence.load_graph()?.ok_or_else(|| {
+            CanopyError::Validation("ready repository is missing graph".to_string())
+        })?;
+        require_graph(&graph)?;
+
+        let (provider, selection) = provider_from_env();
+        let cache = InferenceCache::open(&persistence.canopy_dir.join("cache.db"))?;
+        let mode = if let Some(project) = &self.project {
+            if project.project.settings.mapping_execution_mode
+                == ProjectMappingExecutionMode::StrictModel
+            {
+                InferenceExecutionMode::StrictModel
+            } else {
+                InferenceExecutionMode::HybridFallback
+            }
+        } else {
+            InferenceExecutionMode::StrictModel
+        };
+        let inference = InferenceEngine::new_with_mode(provider, cache, purpose, mode);
+
+        self.repository = repository;
+        self.persistence = persistence;
+        self.graph = graph;
+        self.inference = inference;
+        self.inference_running = false;
+        self.inference_events = None;
+        self.collapsed = Self::collapsed_nodes_for_graph(&self.graph);
+        self.selected_index = 0;
+        self.right_scroll = 0;
+        self.refresh_visible();
+
+        if let Ok(history) = self.persistence.read_queries() {
+            self.query_history = history;
+        } else {
+            self.query_history.clear();
+        }
+
+        if let Some(project) = &mut self.project {
+            project.active_repository_id = Some(repository_id.to_string());
+        }
+        if notify_scheduler {
+            if let Some(tx) = &self.project_commands {
+                let _ = tx.send(ProjectCommand::SwitchActiveRepository {
+                    repository_id: repository_id.to_string(),
+                });
+            }
+        }
+
+        self.status_line = format!("Switched active repository to {name}");
+        if let Some(warning) = selection.warning {
+            self.status_line.push_str(" | ");
+            self.status_line.push_str(&warning);
+        }
+        Ok(())
+    }
+
+    fn project_event_summary(&self, event: &ProjectEvent) -> String {
+        match event {
+            ProjectEvent::RepositoryQueued { repository_id, .. } => {
+                format!("{repository_id}: queued")
+            }
+            ProjectEvent::RepositoryPhase {
+                repository_id,
+                phase,
+                progress_percent,
+                message,
+            } => match (progress_percent, message) {
+                (Some(percent), Some(message)) => {
+                    format!("{repository_id}: {phase:?} ({percent}%) - {message}")
+                }
+                (Some(percent), None) => format!("{repository_id}: {phase:?} ({percent}%)"),
+                (None, Some(message)) => format!("{repository_id}: {phase:?} - {message}"),
+                (None, None) => format!("{repository_id}: {phase:?}"),
+            },
+            ProjectEvent::RepositoryReady {
+                repository_id,
+                nodes,
+                ..
+            } => format!("{repository_id}: ready ({nodes} nodes)"),
+            ProjectEvent::RepositoryFailed {
+                repository_id,
+                error,
+            } => format!("{repository_id}: failed ({error})"),
+            ProjectEvent::RepositoryCanceled { repository_id, .. } => {
+                format!("{repository_id}: canceled")
+            }
+            ProjectEvent::ActiveRepositoryChanged { repository_id } => {
+                format!("active repository: {repository_id}")
             }
         }
     }

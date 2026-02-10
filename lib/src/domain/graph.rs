@@ -240,3 +240,132 @@ impl ArchitectureGraph {
         visited
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_graph() -> ArchitectureGraph {
+        let root_id = "system:test".to_string();
+        let root = ArchitectureNode::new(
+            root_id.clone(),
+            "test".to_string(),
+            NodeKind::System,
+            PathBuf::from("."),
+            None,
+        );
+        ArchitectureGraph::new(root_id, root)
+    }
+
+    #[test]
+    fn validate_rejects_missing_root_node() {
+        let mut graph = sample_graph();
+        graph.root_id = "system:missing".to_string();
+        let err = graph.validate().expect_err("root validation should fail");
+        assert!(err.to_string().contains("root node missing"));
+    }
+
+    #[test]
+    fn validate_rejects_missing_dependency_node() {
+        let mut graph = sample_graph();
+        let mut component = ArchitectureNode::new(
+            "component:app:api".to_string(),
+            "api".to_string(),
+            NodeKind::Component,
+            PathBuf::from("src/api.rs"),
+            Some("system:test".to_string()),
+        );
+        component
+            .dependencies
+            .push("component:app:missing".to_string());
+        graph.add_node(component);
+
+        let err = graph
+            .validate()
+            .expect_err("dependency validation should fail");
+        assert!(err.to_string().contains("missing dependency"));
+    }
+
+    #[test]
+    fn rebuild_dependents_is_deterministic() {
+        let mut graph = sample_graph();
+        let mut upstream = ArchitectureNode::new(
+            "component:app:upstream".to_string(),
+            "upstream".to_string(),
+            NodeKind::Component,
+            PathBuf::from("src/upstream.rs"),
+            Some("system:test".to_string()),
+        );
+        upstream
+            .dependencies
+            .push("component:app:downstream".to_string());
+        let downstream = ArchitectureNode::new(
+            "component:app:downstream".to_string(),
+            "downstream".to_string(),
+            NodeKind::Component,
+            PathBuf::from("src/downstream.rs"),
+            Some("system:test".to_string()),
+        );
+        graph.add_node(upstream);
+        graph.add_node(downstream);
+
+        graph.rebuild_dependents();
+        let first = graph
+            .node("component:app:downstream")
+            .map(|node| node.dependents.clone())
+            .expect("downstream node");
+        graph.rebuild_dependents();
+        let second = graph
+            .node("component:app:downstream")
+            .map(|node| node.dependents.clone())
+            .expect("downstream node");
+
+        assert_eq!(first, second);
+        assert_eq!(second, vec!["component:app:upstream".to_string()]);
+    }
+
+    #[test]
+    fn impact_set_respects_depth_budget() {
+        let mut graph = sample_graph();
+
+        let mut component_a = ArchitectureNode::new(
+            "component:app:a".to_string(),
+            "a".to_string(),
+            NodeKind::Component,
+            PathBuf::from("src/a.rs"),
+            Some("system:test".to_string()),
+        );
+        let mut component_b = ArchitectureNode::new(
+            "component:app:b".to_string(),
+            "b".to_string(),
+            NodeKind::Component,
+            PathBuf::from("src/b.rs"),
+            Some("system:test".to_string()),
+        );
+        let component_c = ArchitectureNode::new(
+            "component:app:c".to_string(),
+            "c".to_string(),
+            NodeKind::Component,
+            PathBuf::from("src/c.rs"),
+            Some("system:test".to_string()),
+        );
+
+        component_a.dependencies.push("component:app:b".to_string());
+        component_b.dependencies.push("component:app:c".to_string());
+
+        graph.add_node(component_a);
+        graph.add_node(component_b);
+        graph.add_node(component_c);
+        graph.rebuild_dependents();
+
+        assert!(graph.impact_set("component:app:c", 0).is_empty());
+
+        let depth_one = graph.impact_set("component:app:c", 1);
+        assert!(depth_one.contains("component:app:b"));
+        assert!(!depth_one.contains("component:app:a"));
+
+        let depth_two = graph.impact_set("component:app:c", 2);
+        assert!(depth_two.contains("component:app:b"));
+        assert!(depth_two.contains("component:app:a"));
+    }
+}

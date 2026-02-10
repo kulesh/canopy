@@ -1,215 +1,231 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::sync::mpsc;
-use std::thread;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use ignore::WalkBuilder;
 use tracing::info;
 
 use crate::application::config::AppConfig;
-use crate::application::diagnostics::DiagnosticsLogger;
-use crate::application::harness::{generate_mapping_policy_with_progress, HarnessProgressEvent};
+use crate::application::project::{
+    start_project_scheduler, ProjectCommand, ProjectSchedulerConfig,
+};
 use crate::application::state::{require_graph, AppState};
-use crate::domain::{ArchitectureGraph, Repository};
-use crate::error::Result;
-use crate::inference::{InferenceEngine, InferenceProgress};
+use crate::domain::{
+    ArchitectureGraph, ArchitectureNode, NodeKind, OnboardingPhase, Project,
+    ProjectMappingExecutionMode, ProjectRepository, ProjectRuntimeState, ProjectSettings,
+    Repository,
+};
+use crate::error::{CanopyError, Result};
+use crate::inference::{InferenceEngine, InferenceExecutionMode};
 use crate::infrastructure::{
-    collect_git_signals, compare_branches, discover_repository, load_workspace,
-    map_repository_architecture_with_policy_and_progress, merge_workspace_graphs, parse_lcov,
-    provider_from_env, C4MappingPolicy, InferenceCache, LlmProvider, PersistenceStore,
-    RepoMapProgress,
+    discover_repository, is_first_pass_scope_file, load_workspace, provider_from_env,
+    InferenceCache, PersistenceStore, ProjectStore,
 };
 use crate::tui;
 
 pub async fn run(config: AppConfig) -> Result<()> {
-    eprintln!("[1/5] Discovering repository...");
-    let repository = discover_repository(&config.input_path)?;
-    let persistence = PersistenceStore::new(&repository.root)?;
-    let diagnostics = DiagnosticsLogger::open(&persistence.canopy_dir).ok();
-    log_diagnostic(
-        diagnostics.as_ref(),
-        "startup_phase",
-        json!({"step": 1, "total": 5, "label": "Discovering repository", "repo_root": repository.root.display().to_string()}),
-    );
+    let project_manifest = resolve_project_manifest_path(&config)?;
+    run_project_mode(config, &project_manifest)
+}
 
-    eprintln!("[2/5] Configuring AI provider and cache...");
-    let (provider, selection) = provider_from_env();
-    let cache = InferenceCache::open(&persistence.canopy_dir.join("cache.db"))?;
-    let inference_purpose = config.purpose.clone();
-    log_diagnostic(
-        diagnostics.as_ref(),
-        "startup_phase",
-        json!({"step": 2, "total": 5, "label": "Configuring AI provider and cache", "provider": selection.provider_name, "model": selection.model}),
-    );
+fn resolve_project_manifest_path(config: &AppConfig) -> Result<PathBuf> {
+    if let Some(project_path) = config.project_path.clone() {
+        return Ok(project_path);
+    }
 
-    eprintln!("[3/5] Building architecture graph...");
-    let (mut graph, mapping_note) = if let Some(workspace_path) = &config.workspace_path {
-        let workspace = load_workspace(workspace_path)?;
-        let mut graphs = Vec::new();
-        for entry in workspace.repositories {
-            let repo = discover_repository(&entry.path)?;
-            let policy = try_generate_mapping_policy(
-                &repo,
-                &config.purpose,
-                provider.as_deref(),
-                Some(&repo.name),
-                diagnostics.as_ref(),
-            )
-            .await
-            .map_err(|err| {
-                eprintln!(
-                    "  -> [{}] policy generation failed, using fallback mapper: {err}",
-                    repo.name
-                );
-                log_diagnostic(
-                    diagnostics.as_ref(),
-                    "policy_fallback",
-                    json!({"repository": repo.name, "reason": err.to_string()}),
-                );
-                err
-            })
-            .ok()
-            .flatten();
-            let graph = map_single_repository_graph(
-                &repo,
-                policy.as_ref(),
-                Some(&repo.name),
-                diagnostics.as_ref(),
-            )?;
-            graphs.push((entry.name, graph));
+    if let Some(workspace_path) = config.workspace_path.as_ref() {
+        return ensure_workspace_project_manifest(workspace_path);
+    }
+
+    ensure_single_repo_project_manifest(&config.input_path)
+}
+
+fn ensure_single_repo_project_manifest(input_path: &Path) -> Result<PathBuf> {
+    let repository = discover_repository(input_path)?;
+    let manifest_dir = repository.root.join(".canopy-project");
+    fs::create_dir_all(&manifest_dir).map_err(|source| CanopyError::io(&manifest_dir, source))?;
+    let manifest_path = manifest_dir.join("project.toml");
+    if manifest_path.exists() {
+        return Ok(manifest_path);
+    }
+
+    let repository_id = "repo".to_string();
+    let project = Project {
+        name: repository.name.clone(),
+        repositories: vec![ProjectRepository {
+            id: repository_id.clone(),
+            name: repository.name,
+            path: PathBuf::from(".."),
+            enabled: true,
+        }],
+        active_repository_id: Some(repository_id),
+        settings: ProjectSettings::default(),
+    };
+    write_project_manifest(&manifest_path, &project)?;
+    Ok(manifest_path)
+}
+
+fn ensure_workspace_project_manifest(workspace_path: &Path) -> Result<PathBuf> {
+    let workspace = load_workspace(workspace_path)?;
+    if workspace.repositories.is_empty() {
+        return Err(CanopyError::Validation(
+            "workspace config requires at least one repository".to_string(),
+        ));
+    }
+
+    let workspace_root = workspace_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let manifest_dir = workspace_root.join(".canopy-project");
+    fs::create_dir_all(&manifest_dir).map_err(|source| CanopyError::io(&manifest_dir, source))?;
+
+    let stem = workspace_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("workspace");
+    let manifest_path = manifest_dir.join(format!("{stem}.project.toml"));
+    if manifest_path.exists() {
+        return Ok(manifest_path);
+    }
+
+    let mut seen_ids = BTreeSet::new();
+    let mut repositories = Vec::new();
+    for (index, entry) in workspace.repositories.into_iter().enumerate() {
+        let base_id = sanitize_project_id(&entry.name);
+        let mut id = base_id.clone();
+        if id.is_empty() {
+            id = format!("repo-{}", index + 1);
         }
-        (merge_workspace_graphs(&graphs), "map:workspace".to_string())
-    } else if let Some(cached) = persistence.load_graph()? {
-        eprintln!("  -> loaded cached graph: {} nodes", cached.nodes.len());
-        if let Some(policy) = persistence.load_mapping_policy()? {
-            (
-                cached,
-                format!(
-                    "map:cached-policy:{}:{}",
-                    policy.provider.unwrap_or_else(|| "unknown".to_string()),
-                    policy.model.unwrap_or_else(|| "unknown".to_string())
-                ),
-            )
+        if seen_ids.contains(&id) {
+            let mut suffix = 2usize;
+            loop {
+                let candidate = format!("{id}-{suffix}");
+                if !seen_ids.contains(&candidate) {
+                    id = candidate;
+                    break;
+                }
+                suffix += 1;
+            }
+        }
+        seen_ids.insert(id.clone());
+
+        let resolved_path = if entry.path.is_relative() {
+            workspace_root.join(entry.path)
         } else {
-            (cached, "map:cached-graph".to_string())
-        }
-    } else {
-        let (policy, note) = match try_generate_mapping_policy(
-            &repository,
-            &config.purpose,
-            provider.as_deref(),
-            None,
-            diagnostics.as_ref(),
-        )
-        .await
-        {
-            Ok(Some(policy)) => {
-                persistence.save_mapping_policy(&policy)?;
-                let note = format!(
-                    "map:policy:{}:{}",
-                    policy
-                        .provider
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    policy
-                        .model
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string())
-                );
-                (Some(policy), note)
-            }
-            Ok(None) => (None, "map:fallback:no-provider".to_string()),
-            Err(err) => {
-                eprintln!("  -> mapping policy unavailable, using fallback mapper: {err}");
-                log_diagnostic(
-                    diagnostics.as_ref(),
-                    "policy_fallback",
-                    json!({"repository": repository.name, "reason": err.to_string()}),
-                );
-                (None, "map:fallback:policy-error".to_string())
-            }
+            entry.path
         };
+        repositories.push(ProjectRepository {
+            id,
+            name: entry.name,
+            path: resolved_path,
+            enabled: true,
+        });
+    }
 
-        let graph =
-            map_single_repository_graph(&repository, policy.as_ref(), None, diagnostics.as_ref())?;
-        (graph, note)
+    let active_repository_id = repositories.first().map(|repository| repository.id.clone());
+    let project = Project {
+        name: stem.to_string(),
+        repositories,
+        active_repository_id,
+        settings: ProjectSettings::default(),
+    };
+    write_project_manifest(&manifest_path, &project)?;
+    Ok(manifest_path)
+}
+
+fn write_project_manifest(manifest_path: &Path, project: &Project) -> Result<()> {
+    let payload = toml::to_string_pretty(project).map_err(|err| {
+        CanopyError::Validation(format!("unable to encode project manifest: {err}"))
+    })?;
+    fs::write(manifest_path, payload).map_err(|source| CanopyError::io(manifest_path, source))
+}
+
+fn sanitize_project_id(name: &str) -> String {
+    let normalized = name
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    normalized.trim_matches('-').to_string()
+}
+
+fn run_project_mode(config: AppConfig, project_path: &Path) -> Result<()> {
+    let project_store = ProjectStore::new(project_path);
+    let project = project_store.load_project()?;
+    let runtime_state = match project_store.load_runtime_state()? {
+        Some(state) => state,
+        None => {
+            let initial = ProjectRuntimeState::from_project(&project);
+            project_store.save_runtime_state(&initial)?;
+            initial
+        }
     };
 
-    let mut hasher = DefaultHasher::new();
-    repository.root.hash(&mut hasher);
-    selection.provider_name.hash(&mut hasher);
-    selection.model.hash(&mut hasher);
-    let repo_hash = format!("{:x}", hasher.finish());
-
-    graph.rebuild_dependents();
-    require_graph(&graph)?;
-    persistence.save_graph(&graph)?;
-    log_diagnostic(
-        diagnostics.as_ref(),
-        "graph_ready",
-        json!({"nodes": graph.nodes.len(), "mapping_note": mapping_note.clone()}),
+    let scheduler = start_project_scheduler(
+        project.clone(),
+        project_store,
+        runtime_state.clone(),
+        config.purpose.clone(),
+        ProjectSchedulerConfig::from_settings(&project.settings),
     );
 
-    eprintln!("[4/5] Starting background semantic inference...");
-    log_diagnostic(
-        diagnostics.as_ref(),
-        "startup_phase",
-        json!({"step": 4, "total": 5, "label": "Starting background semantic inference"}),
-    );
-    let (inference_tx, inference_rx) = mpsc::channel::<InferenceProgress>();
-    let startup_graph = graph.clone();
-    let startup_hash = repo_hash.clone();
-    let startup_cache_path = persistence.canopy_dir.join("cache.db");
-    let startup_purpose = inference_purpose.clone();
-    let (startup_provider, _) = provider_from_env();
-    thread::spawn(move || {
-        let mut worker_graph = startup_graph;
-        let worker_cache = match InferenceCache::open(&startup_cache_path) {
-            Ok(cache) => cache,
-            Err(err) => {
-                let _ = inference_tx.send(InferenceProgress::ProviderDisabled {
-                    reason: format!("unable to open inference cache: {err}"),
-                });
-                return;
-            }
+    let active_repository_id = select_initial_active_repository_id(&project, &runtime_state)
+        .ok_or_else(|| {
+            CanopyError::Validation(
+                "project requires at least one enabled repository entry".to_string(),
+            )
+        })?;
+    let active_repository_entry = project
+        .repositories
+        .iter()
+        .find(|repository| repository.id == active_repository_id)
+        .ok_or_else(|| {
+            CanopyError::Validation(format!(
+                "active repository id '{}' is missing from project manifest",
+                active_repository_id
+            ))
+        })?;
+
+    let active_repository = discover_repository(&active_repository_entry.path)?;
+    let persistence = PersistenceStore::new(&active_repository.root)?;
+    let graph = load_or_placeholder_graph(&active_repository, &persistence)?;
+    let (provider, selection) = provider_from_env();
+    let cache = InferenceCache::open(&persistence.canopy_dir.join("cache.db"))?;
+    let inference_mode =
+        if project.settings.mapping_execution_mode == ProjectMappingExecutionMode::StrictModel {
+            InferenceExecutionMode::StrictModel
+        } else {
+            InferenceExecutionMode::HybridFallback
         };
-        let mut worker = InferenceEngine::new(startup_provider, worker_cache, startup_purpose);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-        match runtime {
-            Ok(rt) => {
-                let result = rt.block_on(async {
-                    worker
-                        .infer_graph_with_progress(&mut worker_graph, &startup_hash, |event| {
-                            let _ = inference_tx.send(event);
-                        })
-                        .await
-                });
-                if let Err(err) = result {
-                    let _ = inference_tx.send(InferenceProgress::ProviderDisabled {
-                        reason: err.to_string(),
-                    });
-                }
-            }
-            Err(err) => {
-                let _ = inference_tx.send(InferenceProgress::ProviderDisabled {
-                    reason: format!("unable to create async runtime: {err}"),
-                });
-            }
-        }
-    });
-
-    let inference = InferenceEngine::new(provider, cache, inference_purpose);
+    let inference =
+        InferenceEngine::new_with_mode(provider, cache, config.purpose.clone(), inference_mode);
 
     let mut state = AppState::new(
-        repository.clone(),
+        active_repository,
         persistence,
         graph,
         inference,
         config.author,
     );
-    state.attach_inference_events(inference_rx);
+    let command_tx = scheduler.command_tx;
+    let event_rx = scheduler.event_rx;
+    state.attach_project_events(event_rx);
+    state.attach_project_commands(command_tx.clone());
+    state.configure_project(
+        project,
+        runtime_state,
+        project_path.to_path_buf(),
+        active_repository_id,
+        config.purpose.clone(),
+    );
+
     if let Ok(history) = state.persistence.read_queries() {
         state.query_history = history;
     }
@@ -217,119 +233,150 @@ pub async fn run(config: AppConfig) -> Result<()> {
     if let Some(warning) = selection.warning {
         append_status_line(&mut state.status_line, &warning);
     }
-    append_status_line(&mut state.status_line, &mapping_note);
-
-    let lcov = repository.root.join("coverage/lcov.info");
-    if lcov.exists() {
-        if let Ok(map) = parse_lcov(&lcov) {
-            state.coverage = map;
-        }
-    }
-
-    if let Ok(signals) = collect_git_signals(&repository.root, 100) {
-        state.git_signals = signals;
-    }
-    if let Ok(diff) = compare_branches(&repository.root, "HEAD~1", "HEAD") {
-        append_status_line(
-            &mut state.status_line,
-            format!(
-                "branch delta +{} ~{} -{}",
-                diff.added, diff.modified, diff.removed
-            ),
-        );
-    }
-
-    if config.no_tui {
-        eprintln!("[5/5] Skipping TUI (--no-tui)...");
-        log_diagnostic(
-            diagnostics.as_ref(),
-            "startup_phase",
-            json!({"step": 5, "total": 5, "label": "Skipping TUI", "reason": "--no-tui"}),
-        );
-        return Ok(());
-    }
-
-    eprintln!("[5/5] Launching TUI...");
-    log_diagnostic(
-        diagnostics.as_ref(),
-        "startup_phase",
-        json!({"step": 5, "total": 5, "label": "Launching TUI"}),
+    append_status_line(
+        &mut state.status_line,
+        "Project mode active. Press P for project view.",
     );
-    info!(repo = %repository.root.display(), "starting canopy tui");
-    tui::run_tui(&mut state)?;
-    info!("canopy tui exited");
 
-    Ok(())
+    info!(project_file = %project_path.display(), "starting canopy tui");
+    let run_result = tui::run_tui(&mut state);
+    let _ = command_tx.send(ProjectCommand::Shutdown);
+    run_result
 }
 
-fn map_single_repository_graph(
-    repository: &Repository,
-    policy: Option<&C4MappingPolicy>,
-    label: Option<&str>,
-    diagnostics: Option<&DiagnosticsLogger>,
-) -> Result<ArchitectureGraph> {
-    map_repository_architecture_with_policy_and_progress(repository, policy, |event| {
-        let event_name = format!("{event:?}");
-        match event {
-            RepoMapProgress::ScanStarted => match label {
-                Some(name) => eprintln!("  -> [{name}] scanning files"),
-                None => eprintln!("  -> scanning files"),
-            },
-            RepoMapProgress::FilesScanned { source_files } => match label {
-                Some(name) => eprintln!("  -> [{name}] source files scanned: {source_files}"),
-                None => eprintln!("  -> source files scanned: {source_files}"),
-            },
-            RepoMapProgress::ScanCompleted { source_files } => match label {
-                Some(name) => eprintln!("  -> [{name}] scan complete: {source_files} source files"),
-                None => eprintln!("  -> scan complete: {source_files} source files"),
-            },
-            RepoMapProgress::PolicyApplied {
-                included_files,
-                excluded_files,
-            } => match label {
-                Some(name) => eprintln!(
-                    "  -> [{name}] policy applied: include={included_files} exclude={excluded_files}"
-                ),
-                None => {
-                    eprintln!(
-                        "  -> policy applied: include={included_files} exclude={excluded_files}"
-                    )
-                }
-            },
-            RepoMapProgress::ContainersBuilt { containers } => match label {
-                Some(name) => eprintln!("  -> [{name}] containers discovered: {containers}"),
-                None => eprintln!("  -> containers discovered: {containers}"),
-            },
-            RepoMapProgress::DependencyPass { components } => match label {
-                Some(name) => {
-                    eprintln!("  -> [{name}] dependency pass across {components} component(s)")
-                }
-                None => eprintln!("  -> dependency pass across {components} component(s)"),
-            },
-            RepoMapProgress::Completed { nodes } => match label {
-                Some(name) => eprintln!("  -> [{name}] graph complete: {nodes} nodes"),
-                None => eprintln!("  -> graph complete: {nodes} nodes"),
-            },
+fn select_initial_active_repository_id(
+    project: &Project,
+    runtime_state: &ProjectRuntimeState,
+) -> Option<String> {
+    if let Some(active_id) = project.active_repository_id.as_ref() {
+        let is_ready = runtime_state
+            .repositories
+            .get(active_id)
+            .map(|state| state.phase == OnboardingPhase::Ready)
+            .unwrap_or(false);
+        if is_ready {
+            return Some(active_id.clone());
         }
-        log_diagnostic(
-            diagnostics,
-            "repo_map_progress",
-            json!({"repository": label.unwrap_or(&repository.name), "event": event_name}),
-        );
-    })
+    }
+
+    if let Some(repository) = project.repositories.iter().find(|repository| {
+        runtime_state
+            .repositories
+            .get(&repository.id)
+            .map(|state| state.phase == OnboardingPhase::Ready)
+            .unwrap_or(false)
+    }) {
+        return Some(repository.id.clone());
+    }
+
+    project
+        .repositories
+        .iter()
+        .find(|repository| repository.enabled)
+        .or_else(|| project.repositories.first())
+        .map(|repository| repository.id.clone())
 }
 
-async fn try_generate_mapping_policy(
+fn load_or_placeholder_graph(
     repository: &Repository,
-    purpose: &str,
-    provider: Option<&dyn LlmProvider>,
-    label: Option<&str>,
-    diagnostics: Option<&DiagnosticsLogger>,
-) -> Result<Option<C4MappingPolicy>> {
-    generate_mapping_policy_with_progress(repository, purpose, provider, |event| {
-        emit_harness_progress(label, event, diagnostics);
-    })
-    .await
+    persistence: &PersistenceStore,
+) -> Result<ArchitectureGraph> {
+    if let Some(graph) = persistence.load_graph()? {
+        require_graph(&graph)?;
+        return Ok(graph);
+    }
+
+    Ok(bootstrap_graph(repository))
+}
+
+fn bootstrap_graph(repository: &Repository) -> ArchitectureGraph {
+    let root_id = format!("system:{}", sanitize_graph_id(&repository.name));
+    let mut graph = ArchitectureGraph::new(
+        root_id.clone(),
+        ArchitectureNode::new(
+            root_id,
+            repository.name.clone(),
+            NodeKind::System,
+            repository.root.clone(),
+            None,
+        ),
+    );
+
+    let mut containers = BTreeMap::<String, PathBuf>::new();
+    let mut walker = WalkBuilder::new(&repository.root);
+    walker.hidden(true);
+    walker.git_ignore(true);
+    walker.git_exclude(true);
+    walker.parents(true);
+    walker.max_depth(Some(6));
+
+    for entry in walker.build() {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if !entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let path = entry.path();
+        if !is_first_pass_scope_file(path) {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(&repository.root) else {
+            continue;
+        };
+        let mut components = relative.components();
+        let container = components
+            .next()
+            .and_then(|component| component.as_os_str().to_str())
+            .unwrap_or("root");
+        let container_key = if container.is_empty() {
+            "root"
+        } else {
+            container
+        };
+        containers
+            .entry(container_key.to_string())
+            .or_insert_with(|| repository.root.join(container_key));
+    }
+
+    if containers.is_empty() {
+        containers.insert("src".to_string(), repository.root.join("src"));
+    }
+
+    for (name, path) in containers {
+        let container_id = format!("container:{}", sanitize_graph_id(&name));
+        let mut node = ArchitectureNode::new(
+            container_id,
+            name,
+            NodeKind::Container,
+            path,
+            Some(graph.root_id.clone()),
+        );
+        node.summary = "Bootstrapped container while onboarding runs".to_string();
+        node.confidence = 0.5;
+        graph.add_node(node);
+    }
+
+    graph
+}
+
+fn sanitize_graph_id(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
 }
 
 fn append_status_line(status_line: &mut String, segment: impl AsRef<str>) {
@@ -344,119 +391,4 @@ fn append_status_line(status_line: &mut String, segment: impl AsRef<str>) {
     }
     status_line.push_str(" | ");
     status_line.push_str(segment);
-}
-
-fn emit_harness_progress(
-    repo_label: Option<&str>,
-    event: HarnessProgressEvent,
-    diagnostics: Option<&DiagnosticsLogger>,
-) {
-    let prefix = match repo_label {
-        Some(name) => format!("  -> [{name}] policy"),
-        None => "  -> policy".to_string(),
-    };
-    match event {
-        HarnessProgressEvent::Phase {
-            label: phase_label,
-            percent,
-        } => {
-            eprintln!("{prefix} {} {phase_label}", progress_bar(percent));
-            log_diagnostic(
-                diagnostics,
-                "policy_progress",
-                json!({"repository": repo_label, "event": "phase", "label": phase_label, "percent": percent}),
-            );
-        }
-        HarnessProgressEvent::AttemptStart { current, total } => {
-            eprintln!("{prefix} {} attempt {current}/{total}", progress_bar(25));
-            log_diagnostic(
-                diagnostics,
-                "policy_progress",
-                json!({"repository": repo_label, "event": "attempt_start", "current": current, "total": total}),
-            );
-        }
-        HarnessProgressEvent::ToolCall {
-            tool,
-            input_summary,
-        } => {
-            eprintln!("{prefix} tool {tool} {input_summary}");
-            log_diagnostic(
-                diagnostics,
-                "policy_tool_call",
-                json!({"repository": repo_label, "tool": tool, "input_summary": input_summary}),
-            );
-        }
-        HarnessProgressEvent::ToolResult { tool, is_error } => {
-            let status = if is_error { "error" } else { "ok" };
-            eprintln!("{prefix} tool-result {tool} {status}");
-            log_diagnostic(
-                diagnostics,
-                "policy_tool_result",
-                json!({"repository": repo_label, "tool": tool, "status": status}),
-            );
-        }
-        HarnessProgressEvent::Verification { percent } => {
-            eprintln!("{prefix} {} verifying policy", progress_bar(percent));
-            log_diagnostic(
-                diagnostics,
-                "policy_progress",
-                json!({"repository": repo_label, "event": "verification", "percent": percent}),
-            );
-        }
-        HarnessProgressEvent::RepairRequested { reason, percent } => {
-            eprintln!(
-                "{prefix} {} repair requested: {}",
-                progress_bar(percent),
-                clip_single_line(&reason, 120)
-            );
-            log_diagnostic(
-                diagnostics,
-                "policy_repair",
-                json!({"repository": repo_label, "percent": percent, "reason": reason}),
-            );
-        }
-        HarnessProgressEvent::Completed { provider, model } => {
-            eprintln!(
-                "{prefix} {} complete ({provider}:{model})",
-                progress_bar(100)
-            );
-            log_diagnostic(
-                diagnostics,
-                "policy_completed",
-                json!({"repository": repo_label, "provider": provider, "model": model}),
-            );
-        }
-    }
-}
-
-fn log_diagnostic(
-    diagnostics: Option<&DiagnosticsLogger>,
-    event: &str,
-    payload: serde_json::Value,
-) {
-    if let Some(logger) = diagnostics {
-        let _ = logger.log(event, payload);
-    }
-}
-
-fn progress_bar(percent: u8) -> String {
-    let width = 18usize;
-    let capped = percent.min(100) as usize;
-    let filled = (capped * width) / 100;
-    let empty = width.saturating_sub(filled);
-    format!(
-        "[{}{}] {:>3}%",
-        "#".repeat(filled),
-        "-".repeat(empty),
-        capped
-    )
-}
-
-fn clip_single_line(input: &str, max_chars: usize) -> String {
-    let compact = input.replace('\n', " ");
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
-    let clipped: String = compact.chars().take(max_chars).collect();
-    format!("{clipped}...")
 }

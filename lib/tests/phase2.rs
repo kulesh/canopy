@@ -1,7 +1,10 @@
 use std::fs;
 
 use canopy_lib::domain::{ArchitectureGraph, ArchitectureNode, NodeKind};
-use canopy_lib::infrastructure::{merge_workspace_graphs, parse_lcov};
+use canopy_lib::infrastructure::{
+    merge_workspace_graphs, merged_graph_for_active_repository, parse_lcov,
+    upsert_workspace_repository_graph,
+};
 use tempfile::TempDir;
 
 #[test]
@@ -47,4 +50,63 @@ fn merges_workspace_graphs() {
         .nodes
         .keys()
         .any(|id| id.starts_with("repo-a::component:a")));
+}
+
+#[test]
+fn workspace_graph_upsert_and_active_priority_work() {
+    let mut graphs = std::collections::BTreeMap::new();
+    let mut graph_a = ArchitectureGraph::new(
+        "system:a".to_string(),
+        ArchitectureNode::new(
+            "system:a".to_string(),
+            "a".to_string(),
+            NodeKind::System,
+            ".".into(),
+            None,
+        ),
+    );
+    graph_a.add_node(ArchitectureNode::new(
+        "component:a".to_string(),
+        "Auth".to_string(),
+        NodeKind::Component,
+        "src/auth.rs".into(),
+        Some("system:a".to_string()),
+    ));
+
+    let graph_b = ArchitectureGraph::new(
+        "system:b".to_string(),
+        ArchitectureNode::new(
+            "system:b".to_string(),
+            "b".to_string(),
+            NodeKind::System,
+            ".".into(),
+            None,
+        ),
+    );
+
+    let merged_a = upsert_workspace_repository_graph(&mut graphs, "repo-a", graph_a);
+    assert!(merged_a
+        .nodes
+        .keys()
+        .any(|id| id.starts_with("repo-a::component:a")));
+
+    let merged_b = upsert_workspace_repository_graph(&mut graphs, "repo-b", graph_b);
+    assert!(merged_b
+        .nodes
+        .keys()
+        .any(|id| id.starts_with("repo-a::component:a")));
+    assert!(merged_b
+        .nodes
+        .keys()
+        .any(|id| id.starts_with("container:workspace:repo-b")));
+
+    let active_first = merged_graph_for_active_repository(&graphs, "repo-b");
+    let root_children = active_first
+        .node("system:workspace")
+        .map(|node| node.children.clone())
+        .expect("workspace root");
+    assert_eq!(
+        root_children.first().map(String::as_str),
+        Some("container:workspace:repo-b")
+    );
 }

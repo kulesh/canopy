@@ -14,6 +14,9 @@ struct Cli {
     #[arg(long, value_name = "WORKSPACE_TOML")]
     workspace: Option<PathBuf>,
 
+    #[arg(long, value_name = "PROJECT_FILE")]
+    project: Option<PathBuf>,
+
     #[arg(long, env = "CANOPY_AUTHOR", default_value = "unknown")]
     author: String,
 
@@ -23,9 +26,6 @@ struct Cli {
         default_value = "Understand the repository architecture for safe agentic changes"
     )]
     purpose: String,
-
-    #[arg(long, default_value_t = false)]
-    no_tui: bool,
 }
 
 #[tokio::main]
@@ -37,6 +37,12 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let config = AppConfig::new(cli.path, cli.workspace, cli.author, cli.purpose, cli.no_tui);
+    let config = AppConfig::new(
+        cli.path,
+        cli.workspace,
+        cli.project,
+        cli.author,
+        cli.purpose,
+    );
     run(config).await
 }
