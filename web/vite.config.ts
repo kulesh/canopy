@@ -91,10 +91,41 @@ function corsProxy(): Plugin {
   };
 }
 
+/**
+ * Fix model search scoring in pi-web-ui's ModelSelector.
+ *
+ * The library concatenates "provider id name" into one string and runs a
+ * greedy subsequence match. This means "opu" matches 'o','p' in "anthropic"
+ * before reaching "opus", giving every Anthropic model the same score.
+ *
+ * Fix: score each field separately and take the max. Now "opu" matches
+ * "opus" tightly (score ≈ 1.0) and non-opus models score 0.
+ */
+function patchModelSearch(): Plugin {
+  return {
+    name: "patch-model-search",
+    transform(code, id) {
+      if (!id.includes("ModelSelector") || !id.includes("pi-web-ui")) return;
+
+      const target = "const searchText = `${entry.provider} ${entry.id} ${entry.model.name}`.toLowerCase();\n                    const score = subsequenceScore(query, searchText);";
+      if (!code.includes(target)) return;
+
+      const replacement = `const score = Math.max(
+                        subsequenceScore(query, entry.id.toLowerCase()),
+                        subsequenceScore(query, (entry.model.name || "").toLowerCase()),
+                        subsequenceScore(query, entry.provider.toLowerCase()),
+                    );`;
+
+      return code.replace(target, replacement);
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     tailwindcss(),
     corsProxy(),
+    patchModelSearch(),
     VitePWA({
       registerType: "autoUpdate",
       workbox: {
