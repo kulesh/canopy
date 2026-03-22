@@ -7,10 +7,17 @@
 
 import type { Notebook, NotebookCell } from "./types.js";
 
+export type CellEdit = {
+  cellId: string;
+  oldSummary: string;
+  newSummary: string;
+};
+
 export type NotebookEvent =
   | { type: "loaded"; notebook: Notebook }
   | { type: "cell-toggled"; cellId: string; expanded: boolean }
-  | { type: "focus-changed"; cellId: string | null };
+  | { type: "focus-changed"; cellId: string | null }
+  | { type: "cell-edited"; edit: CellEdit };
 
 export type NotebookListener = (event: NotebookEvent) => void;
 
@@ -18,6 +25,8 @@ export class NotebookStore {
   private notebook: Notebook = { cells: new Map(), root_ids: [] };
   private expanded = new Set<string>();
   private focusedCellId: string | null = null;
+  private editingId: string | null = null;
+  private draft: string = "";
   private listeners: NotebookListener[] = [];
 
   get empty(): boolean {
@@ -67,6 +76,61 @@ export class NotebookStore {
     if (this.focusedCellId === cellId) return;
     this.focusedCellId = cellId;
     this.emit({ type: "focus-changed", cellId });
+  }
+
+  // --- Editing ---
+
+  get editingCellId(): string | null {
+    return this.editingId;
+  }
+
+  get editDraft(): string {
+    return this.draft;
+  }
+
+  get isEditing(): boolean {
+    return this.editingId !== null;
+  }
+
+  startEdit(cellId: string): void {
+    const cell = this.notebook.cells.get(cellId);
+    if (!cell) return;
+    this.editingId = cellId;
+    this.draft = cell.summary;
+  }
+
+  updateDraft(text: string): void {
+    this.draft = text;
+  }
+
+  commitEdit(): CellEdit | null {
+    if (!this.editingId) return null;
+    const cell = this.notebook.cells.get(this.editingId);
+    if (!cell) return null;
+
+    const oldSummary = cell.summary;
+    const newSummary = this.draft.trim();
+
+    // No-op if unchanged
+    if (newSummary === oldSummary || newSummary === "") {
+      this.cancelEdit();
+      return null;
+    }
+
+    // Mutate the cell in place
+    cell.summary = newSummary;
+    cell.provenance = { source: "human", edited_at: new Date().toISOString() };
+
+    const edit: CellEdit = { cellId: this.editingId, oldSummary, newSummary };
+    this.editingId = null;
+    this.draft = "";
+    this.emit({ type: "cell-edited", edit });
+    return edit;
+  }
+
+  cancelEdit(): void {
+    this.editingId = null;
+    this.draft = "";
   }
 
   /**

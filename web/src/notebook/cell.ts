@@ -50,6 +50,69 @@ function provenanceBadge(source: "ai" | "human"): TemplateResult {
   `;
 }
 
+function renderSummary(
+  cell: NotebookCell,
+  store: NotebookStore,
+  onRender: () => void,
+): TemplateResult {
+  const editing = store.editingCellId === cell.id;
+
+  if (editing) {
+    return html`
+      <div class="space-y-1.5 pt-2">
+        <textarea
+          class="w-full bg-secondary/50 text-sm text-foreground rounded border border-primary/40 px-2 py-1.5 leading-relaxed resize-y focus:outline-none focus:ring-1 focus:ring-primary/50"
+          rows="3"
+          .value=${store.editDraft}
+          @input=${(e: Event) => {
+            store.updateDraft((e.target as HTMLTextAreaElement).value);
+          }}
+          @keydown=${(e: KeyboardEvent) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              e.stopPropagation();
+              store.commitEdit();
+              onRender();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              e.stopPropagation();
+              store.cancelEdit();
+              onRender();
+            }
+          }}
+          @click=${(e: Event) => e.stopPropagation()}
+        ></textarea>
+        <div class="flex items-center gap-2 text-[10px] text-muted-foreground/60">
+          <span class="font-mono">Ctrl+Enter</span> save
+          <span class="mx-1">·</span>
+          <span class="font-mono">Esc</span> cancel
+        </div>
+      </div>
+    `;
+  }
+
+  return html`
+    <p
+      class="text-sm text-muted-foreground leading-relaxed pt-2 cursor-text rounded px-1 -mx-1 hover:bg-secondary/30 transition-colors"
+      @dblclick=${(e: Event) => {
+        e.stopPropagation();
+        store.startEdit(cell.id);
+        onRender();
+        // Auto-focus the textarea after render
+        requestAnimationFrame(() => {
+          const el = document.querySelector(`[data-cell-id="${cell.id}"] textarea`);
+          if (el instanceof HTMLTextAreaElement) {
+            el.focus();
+            el.setSelectionRange(el.value.length, el.value.length);
+          }
+        });
+      }}
+    >
+      ${cell.summary}
+    </p>
+  `;
+}
+
 export function renderCell(
   cell: NotebookCell,
   store: NotebookStore,
@@ -109,9 +172,7 @@ export function renderCell(
         ? html`
             <div class="px-3 pb-3 space-y-2 border-t border-border/50">
               <!-- Summary -->
-              <p class="text-sm text-muted-foreground leading-relaxed pt-2">
-                ${cell.summary}
-              </p>
+              ${renderSummary(cell, store, onRender)}
 
               <!-- Dependencies -->
               ${cell.dependencies.length > 0

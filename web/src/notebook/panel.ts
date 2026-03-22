@@ -50,6 +50,9 @@ function handleKeyboard(
   store: NotebookStore,
   onRender: () => void,
 ): void {
+  // When editing, let the textarea handle all keys
+  if (store.isEditing) return;
+
   const visible = store.visibleCellIds();
   if (visible.length === 0) return;
 
@@ -58,6 +61,25 @@ function handleKeyboard(
     : -1;
 
   switch (e.key) {
+    case "e": {
+      // Enter edit mode on the focused, expanded cell
+      e.preventDefault();
+      if (store.focusedId && store.isExpanded(store.focusedId)) {
+        store.startEdit(store.focusedId);
+        onRender();
+        // Auto-focus textarea
+        requestAnimationFrame(() => {
+          const el = document.querySelector(
+            `[data-cell-id="${store.focusedId}"] textarea`,
+          );
+          if (el instanceof HTMLTextAreaElement) {
+            el.focus();
+            el.setSelectionRange(el.value.length, el.value.length);
+          }
+        });
+      }
+      break;
+    }
     case "j":
     case "ArrowDown": {
       e.preventDefault();

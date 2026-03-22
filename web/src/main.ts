@@ -301,8 +301,20 @@ async function init() {
 
   chatPanel = new ChatPanel();
 
-  // Subscribe to notebook store for re-renders
-  notebookStore.subscribe(() => renderApp());
+  // Subscribe to notebook store for re-renders and edit events
+  notebookStore.subscribe((event) => {
+    if (event.type === "cell-edited") {
+      const { cellId, oldSummary, newSummary } = event.edit;
+      const cell = notebookStore.cell(cellId);
+      const name = cell?.name ?? cellId;
+      console.log(
+        `[canopy] Cell edited: "${name}"\n  old: ${oldSummary}\n  new: ${newSummary}`,
+      );
+      // TODO (Phase 3b): Send to agent:
+      // `User changed ${name} from "${oldSummary}" to "${newSummary}". Propose code changes.`
+    }
+    renderApp();
+  });
 
   const sessionId = new URLSearchParams(window.location.search).get("session");
   if (sessionId) {
