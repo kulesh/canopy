@@ -74,3 +74,27 @@ export class ToolRegistry {
     }));
   }
 }
+
+/**
+ * Create a registry with all plugins auto-discovered from `./plugins/`.
+ *
+ * Convention: each file in `plugins/` exports a default ToolPlugin.
+ * Drop a file in, it's registered. Remove it, it's gone. No wiring code.
+ */
+export function createRegistry(): ToolRegistry {
+  const registry = new ToolRegistry();
+  const modules = import.meta.glob<{ default: ToolPlugin }>(
+    "./plugins/*.ts",
+    { eager: true },
+  );
+
+  for (const [path, mod] of Object.entries(modules)) {
+    if (!mod.default) {
+      console.warn(`Plugin at ${path} has no default export — skipping`);
+      continue;
+    }
+    registry.register(mod.default);
+  }
+
+  return registry;
+}

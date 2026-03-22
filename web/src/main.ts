@@ -19,8 +19,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { History, Plus, Settings, PanelLeft, PanelLeftClose, FolderOpen } from "lucide";
 import { createCanopyAgent } from "./agent/session.js";
-import { ToolRegistry, type ToolContext } from "./agent/tools.js";
-import { filesystemPlugin } from "./agent/plugins/filesystem.js";
+import { createRegistry, type ToolContext } from "./agent/tools.js";
 import { selectProjectDirectory, isFileSystemAccessSupported } from "./agent/project.js";
 import { NotebookStore, type CellEdit } from "./notebook/store.js";
 import { findLatestNotebook, findLatestChanges } from "./notebook/parse.js";
@@ -70,10 +69,9 @@ async function ensureProxySettings(): Promise<void> {
   }
 }
 
-// --- Tool registry ---
+// --- Tool registry (auto-discovers plugins from ./agent/plugins/) ---
 
-const registry = new ToolRegistry();
-registry.register(filesystemPlugin);
+const registry = createRegistry();
 
 // --- App state ---
 

@@ -200,7 +200,7 @@ function readFileTool(root: FileSystemDirectoryHandle): AgentTool<any> {
 
 // --- Plugin ---
 
-export const filesystemPlugin: ToolPlugin = {
+const filesystemPlugin: ToolPlugin = {
   id: "filesystem",
   label: "File System",
 
@@ -216,3 +216,5 @@ export const filesystemPlugin: ToolPlugin = {
     ];
   },
 };
+
+export default filesystemPlugin;
