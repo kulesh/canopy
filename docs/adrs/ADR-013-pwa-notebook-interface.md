@@ -4,82 +4,73 @@
 Proposed
 
 ## Context
-Canopy's TUI renders architectural views via Ratatui in the terminal. The thesis we're pursuing: developers doing agentic coding rarely need to see raw code — they need precise high-level details at the right granularity in human language, with the ability to zoom in/out (fold/unfold), edit intent rather than syntax, and have the agent mediate between human language and code changes.
+Developers doing agentic coding rarely need to see raw code — they need precise high-level details at the right granularity in human language, with the ability to zoom in/out (fold/unfold), edit intent rather than syntax, and have the agent mediate between human language and code changes.
 
-This interaction model maps naturally to a **notebook metaphor** — cells of human-language intent, foldable to reveal implementation, editable to drive agent-mediated code changes. The terminal constrains this vision; a web-based PWA unlocks richer fold/unfold UX, overlays, and accessibility.
+This interaction model maps naturally to a **notebook metaphor** — cells of human-language intent, foldable to reveal implementation, editable to drive agent-mediated code changes. A web-based PWA is the natural home for this UX.
 
-Pi (pi.dev) is an open-source coding agent with an SDK mode that provides agent runtime (tool calling, LLM routing, session management) embeddable in custom applications. Pi's web-ui library provides reusable chat components.
+Pi (pi.dev) is an open-source coding agent with an SDK mode that provides agent runtime (tool calling, LLM routing, session management) embeddable in custom applications. Pi already reads code, generates understanding, and mediates changes — it is the inference engine. We don't need a separate backend.
 
 ## Decision
-Build a **pure TypeScript PWA** in `web/` that serves as Canopy's notebook interface, using Pi's SDK for agent capabilities. The PWA consumes Canopy's architectural graph as JSON over HTTP/WebSocket from a Canopy server process. No WASM. No tight coupling to Rust internals.
+Build a **pure TypeScript PWA** in `web/` powered entirely by Pi's SDK. Pi reads the codebase, generates architectural understanding, and mediates code changes. The notebook renders that understanding as foldable semantic cells. No Rust dependency. No separate server process.
 
 ### Architecture
 
 ```
-┌─────────────────────────────────┐     ┌──────────────────┐
-│        Canopy PWA (TS)          │     │  Canopy Server   │
-│  ┌───────────────────────────┐  │     │  (Rust binary)   │
-│  │  Semantic Notebook View   │  │◄───►│                  │
-│  │  (fold/unfold, editing)   │  │JSON │  GET /api/graph  │
-│  ├───────────────────────────┤  │ WS  │  WS /api/events  │
-│  │  Pi Agent (SDK)           │  │     │  POST /api/refresh│
-│  │  chat, tool calls, models │  │     └──────────────────┘
+┌─────────────────────────────────┐
+│        Canopy PWA (TS)          │
+│  ┌───────────────────────────┐  │
+│  │  Semantic Notebook View   │  │
+│  │  fold/unfold intent tree  │  │
+│  │  inline editing           │  │
+│  │  diff preview             │  │
+│  ├───────────────────────────┤  │
+│  │  Pi Agent (SDK)           │  │
+│  │  reads code               │  │
+│  │  generates summaries      │  │
+│  │  mediates code changes    │  │
+│  │  session management       │  │
 │  └───────────────────────────┘  │
 └─────────────────────────────────┘
 ```
 
-Two clean, decoupled processes that speak JSON:
-1. **Canopy server** — Rust. Git, LLM inference, C4 mapping, persistence. Serves the graph.
-2. **Canopy PWA** — TypeScript. Rich interactive notebook UI, Pi agent integration.
+Single process. The agent IS the backend.
 
 ### Key Decisions
 
-1. **Pi SDK embedding over Pi extension** — The notebook IS the interface, not a panel within Pi. We need full control over the interaction model. Pi SDK gives us agent capabilities without UI constraints.
+1. **Pi SDK as the entire backend** — Pi already has tools to read files, write files, edit code, and run commands. It can generate architectural summaries on demand. No need for a separate Rust server to do what Pi already does.
 
-2. **Same repo** — `web/` sits alongside `lib/` and `bin/`. Two faces of the same product.
+2. **Completely decoupled from Canopy Rust** — The PWA is a self-contained TypeScript project. It lives in `web/` for co-location but has zero dependency on the Rust workspace. The Rust TUI and the PWA may converge later, but for now they're independent explorations of the same thesis.
 
-3. **Pure TypeScript, no WASM** — Canopy's domain models are serde/JSON structs. TypeScript interfaces mirror them trivially. Graph traversal is a map lookup. The WASM boundary adds build complexity for zero material benefit. The server validates; the client renders.
+3. **Intent-first cells** — The unit of interaction is a semantic block described in human language, not a code cell. Code is an expandable detail within each cell. This inverts the Jupyter model.
 
-4. **JSON contract over HTTP/WebSocket** — The PWA and server are decoupled by a JSON API. The PWA doesn't know the server is Rust. The server doesn't know the PWA exists. This means the PWA works with any backend that serves the same graph schema — including a mock server for development and testing.
+4. **Agent-generated architecture** — On first load, Pi scans the codebase and produces an architectural summary structured as a hierarchy of semantic blocks. This is the notebook's content. The user refines, explores, and edits through the notebook; Pi mediates all code interaction.
 
-5. **Intent-first cells** — The unit of interaction is a semantic block described in human language, not a code cell. Code is an expandable detail within each cell. This inverts the Jupyter model.
-
-6. **Provenance-aware overlays** — The data model supports annotations (metrics, coverage, blame, error rates) attached to semantic blocks from day one, using Canopy's existing provenance metadata on graph nodes.
+5. **Provenance-aware from day one** — Each cell tracks whether its content was AI-generated or human-edited, enabling trust calibration and overlay annotations later.
 
 ### Alternatives Considered
 
 | Approach | Pros | Cons | Verdict |
 |----------|------|------|---------|
-| **Pi Extension** | Ships as `pi install`, leverages Pi's chrome | Constrained by extension API, notebook is second-class | Rejected |
-| **Pi SDK embedding** | Full UX control, Pi handles agent loop | More to build for shell/chrome | **Chosen** |
-| **Pi RPC** | Language-agnostic, maximum decoupling | Latency, lose TypeScript API access | Rejected |
-| **WASM-coupled PWA** | Single source of truth for types | Build complexity, wasm-pack pipeline, no material benefit for JSON rendering | Rejected |
-| **No Pi, custom agent** | Total control | Reimplements tool calling, session mgmt, model routing | Rejected |
+| **PWA + Canopy Rust server** | Leverages existing C4 pipeline | Cross-language coupling, extra process, premature integration | Rejected for now |
+| **PWA + WASM bridge** | Single source of truth for types | Build complexity for zero benefit | Rejected |
+| **Pi Extension** | Ships as `pi install` | Constrained by Pi's chrome, notebook is second-class | Rejected |
+| **Pure TypeScript PWA + Pi SDK** | Simplest possible architecture, one language, one process | Must build architectural scanning in prompts rather than reuse Rust pipeline | **Chosen** |
 
 ## Consequences
 
-### Structural Changes Required
-- New `web/` directory with TypeScript/Vite toolchain
-- `.mise.toml` gains Node.js runtime for web development
-- Canopy server mode added to `bin/` (HTTP/WebSocket API serving the graph)
-- JSON schema documented as the contract between server and PWA
-
 ### What We Gain
-- Rich fold/unfold UX unconstrained by terminal
-- PWA installability (offline-capable, native-feel)
-- Pi's battle-tested agent runtime (tools, sessions, models)
-- Clean decoupling — PWA and server evolve independently
-- Foundation for overlays (production metrics, collaboration)
-- Simple build: `npm run dev` for the PWA, `cargo run --serve` for the server
+- Simplest possible architecture — one language, one process
+- Fast iteration — change TypeScript, see results immediately
+- Pi handles all the hard parts (LLM routing, tool calling, session management)
+- Clean starting point unconstrained by existing Rust patterns
+- Can integrate with Canopy Rust later if/when it makes sense
 
 ### What We Accept
-- Two rendering targets to maintain (TUI + PWA)
-- TypeScript + Rust polyglot codebase (but cleanly separated)
-- Pi SDK as a runtime dependency (open-source, MIT licensed)
-- Domain model types duplicated in TypeScript (trivial, ~50 lines)
+- Architectural scanning is prompt-driven (Pi + LLM) rather than code-driven (Canopy's heuristics + mapping policy)
+- No offline-first architecture scanning (requires LLM access)
+- Domain model defined fresh in TypeScript, not derived from Rust
 
-### Risk Mitigations
-- TUI remains the primary interface during PWA development; no regression
-- JSON contract means either side can be replaced or mocked independently
-- Pi SDK is embeddable and replaceable; the notebook UX is ours
-- TypeScript types can be auto-generated from Rust structs via `ts-rs` if duplication becomes burdensome later
+### What Stays Open
+- Whether the Rust TUI and PWA converge or remain parallel interfaces
+- Whether Canopy's C4 mapping pipeline feeds into the PWA later
+- Production overlay sources (Phase 4 concern)
