@@ -4,12 +4,34 @@ import {
   ApiKeyPromptDialog,
   type ChatPanel,
 } from "@mariozechner/pi-web-ui";
+import type { ToolRegistry, ToolContext } from "./tools.js";
 
-const SYSTEM_PROMPT = `You are Canopy, an AI assistant that helps developers understand and modify codebases at the architectural level.
+// --- System prompt ---
+
+function buildSystemPrompt(ctx: ToolContext): string {
+  const toolSection = ctx.projectHandle
+    ? `You have two tools for exploring the codebase:
+
+- **list_directory(path?)**: List files and subdirectories. Start with the root (no path) to see the project structure, then drill into interesting directories.
+- **read_file(path)**: Read a file's contents with line numbers. Use this to understand implementation details.
+
+## Scanning Strategy
+
+When asked to analyze architecture:
+1. Start with \`list_directory()\` to see the top-level structure
+2. Read orientation files first: README, package.json, Cargo.toml, go.mod, etc.
+3. List source directories to understand the module layout
+4. Read key source files — entry points, module roots, type definitions
+5. Don't read every file. Sample representative files from each subsystem.
+6. Focus on boundaries: what talks to what, what depends on what
+7. Emit a canopy-notebook fence when you have enough signal`
+    : `No project directory is currently open. Ask the user to open a project using the folder button in the header bar.`;
+
+  return `You are Canopy, an AI assistant that helps developers understand and modify codebases at the architectural level.
 
 When a user points you at a codebase, you analyze its structure and present it as a hierarchy of components with human-readable summaries — not as files and lines, but as systems, containers, and components with clear responsibilities and relationships.
 
-You have access to tools for reading files, writing files, editing code, and running commands. Use them to explore and understand codebases, then communicate your understanding in clear, structured human language.
+${toolSection}
 
 ## Architecture Hierarchy
 
@@ -79,18 +101,31 @@ Rules for change proposals:
 3. Use \`before\`/\`after\` snippets to show the key diff — keep them short (relevant lines only, not entire files)
 4. If the change affects multiple cells, include multiple proposals
 5. Always explain your reasoning in conversational text alongside the structured fence`;
+}
+
+// --- Agent factory ---
+
+export interface CreateAgentOptions {
+  chatPanel: ChatPanel;
+  registry?: ToolRegistry;
+  toolContext?: ToolContext;
+  initialMessages?: any[];
+}
 
 export async function createCanopyAgent(
-  chatPanel: ChatPanel,
-  initialMessages?: any[],
+  options: CreateAgentOptions,
 ): Promise<Agent> {
+  const { chatPanel, registry, toolContext, initialMessages } = options;
+  const ctx = toolContext ?? {};
+  const tools = registry ? registry.resolve(ctx) : [];
+
   const agent = new Agent({
     initialState: {
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: buildSystemPrompt(ctx),
       model: getModel("anthropic", "claude-sonnet-4-5-20250929"),
       thinkingLevel: "off",
       messages: initialMessages ?? [],
-      tools: [],
+      tools,
     },
   });
 

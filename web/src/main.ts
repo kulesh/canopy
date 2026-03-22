@@ -17,8 +17,11 @@ import type { Agent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { html, render } from "lit";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { History, Plus, Settings, PanelLeft, PanelLeftClose } from "lucide";
+import { History, Plus, Settings, PanelLeft, PanelLeftClose, FolderOpen } from "lucide";
 import { createCanopyAgent } from "./agent/session.js";
+import { ToolRegistry, type ToolContext } from "./agent/tools.js";
+import { filesystemPlugin } from "./agent/plugins/filesystem.js";
+import { selectProjectDirectory, isFileSystemAccessSupported } from "./agent/project.js";
 import { NotebookStore, type CellEdit } from "./notebook/store.js";
 import { findLatestNotebook, findLatestChanges } from "./notebook/parse.js";
 import { renderNotebookPanel } from "./notebook/panel.js";
@@ -67,6 +70,11 @@ async function ensureProxySettings(): Promise<void> {
   }
 }
 
+// --- Tool registry ---
+
+const registry = new ToolRegistry();
+registry.register(filesystemPlugin);
+
 // --- App state ---
 
 let agent: Agent;
@@ -76,6 +84,8 @@ let currentTitle = "";
 let agentUnsubscribe: (() => void) | undefined;
 let notebookVisible = false;
 let mobilePanel: "chat" | "notebook" = "chat";
+let projectName: string | undefined;
+let toolContext: ToolContext = {};
 
 const notebookStore = new NotebookStore();
 
@@ -213,12 +223,43 @@ function requestRescan(cellIds: string[]): void {
   agent.prompt(prompt);
 }
 
+// --- Project directory ---
+
+async function openProject(): Promise<void> {
+  try {
+    const handle = await selectProjectDirectory();
+    projectName = handle.name;
+    toolContext = { projectHandle: handle };
+
+    // Reinitialize agent with file system tools now available
+    await initAgent();
+
+    // Auto-trigger architecture scan
+    agent.prompt(
+      `Analyze the architecture of this project ("${handle.name}"). ` +
+      `Start by exploring the directory structure and reading key files, ` +
+      `then present your findings as a canopy-notebook.`,
+    );
+
+    renderApp();
+  } catch (e) {
+    // User cancelled the picker — do nothing
+    if ((e as Error).name === "AbortError") return;
+    console.error("Failed to open project:", e);
+  }
+}
+
 // --- Agent lifecycle ---
 
 async function initAgent(initialMessages?: AgentMessage[]) {
   if (agentUnsubscribe) agentUnsubscribe();
 
-  agent = await createCanopyAgent(chatPanel, initialMessages);
+  agent = await createCanopyAgent({
+    chatPanel,
+    registry,
+    toolContext,
+    initialMessages,
+  });
 
   // If restoring a session, check for existing notebook data
   if (initialMessages) {
@@ -277,6 +318,10 @@ function renderApp() {
   const mobile = isMobile();
   const showNotebook = notebookVisible && (!mobile || mobilePanel === "notebook");
   const showChat = !mobile || mobilePanel === "chat";
+  const fsSupported = isFileSystemAccessSupported();
+  const displayTitle = projectName
+    ? `${currentTitle || "Canopy"} — ${projectName}`
+    : (currentTitle || "Canopy");
 
   render(
     html`
@@ -304,8 +349,17 @@ function renderApp() {
               onClick: newSession,
               title: "New Session",
             })}
+            ${fsSupported
+              ? Button({
+                  variant: "ghost",
+                  size: "sm",
+                  children: icon(FolderOpen, "sm"),
+                  onClick: openProject,
+                  title: "Open Project",
+                })
+              : ""}
             <span class="text-sm font-medium text-foreground truncate max-w-xs">
-              ${currentTitle || "Canopy"}
+              ${displayTitle}
             </span>
           </div>
           <div class="flex items-center gap-1 px-2">
@@ -432,9 +486,16 @@ init();
 if (import.meta.env.DEV) {
   (window as any).__canopy__ = {
     store: notebookStore,
+    registry,
+    toolContext,
     renderApp,
     get agent() { return agent; },
     showNotebook() { notebookVisible = true; renderApp(); },
     hideNotebook() { notebookVisible = false; renderApp(); },
+    setProject(handle: FileSystemDirectoryHandle) {
+      projectName = handle.name;
+      toolContext = { projectHandle: handle };
+      renderApp();
+    },
   };
 }
