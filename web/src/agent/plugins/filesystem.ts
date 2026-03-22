@@ -14,7 +14,7 @@
 
 import { Type } from "@sinclair/typebox";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { ToolPlugin, ToolContext } from "../tools.js";
+import type { Plugin, PluginContext } from "../plugins.js";
 
 // --- Ignore patterns ---
 
@@ -200,15 +200,15 @@ function readFileTool(root: FileSystemDirectoryHandle): AgentTool<any> {
 
 // --- Plugin ---
 
-const filesystemPlugin: ToolPlugin = {
+const filesystemPlugin: Plugin = {
   id: "filesystem",
   label: "File System",
 
-  available(ctx: ToolContext): boolean {
+  available(ctx: PluginContext): boolean {
     return ctx.projectHandle !== undefined;
   },
 
-  createTools(ctx: ToolContext): AgentTool[] {
+  tools(ctx: PluginContext): AgentTool[] {
     if (!ctx.projectHandle) return [];
     return [
       listDirectoryTool(ctx.projectHandle),

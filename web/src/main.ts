@@ -19,7 +19,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { History, Plus, Settings, PanelLeft, PanelLeftClose, FolderOpen } from "lucide";
 import { createCanopyAgent } from "./agent/session.js";
-import { createRegistry, type ToolContext } from "./agent/tools.js";
+import { createRegistry, type PluginContext } from "./agent/plugins.js";
 import { selectProjectDirectory, isFileSystemAccessSupported } from "./agent/project.js";
 import { NotebookStore, type CellEdit } from "./notebook/store.js";
 import { findLatestNotebook, findLatestChanges } from "./notebook/parse.js";
@@ -69,7 +69,7 @@ async function ensureProxySettings(): Promise<void> {
   }
 }
 
-// --- Tool registry (auto-discovers plugins from ./agent/plugins/) ---
+// --- Plugin registry (auto-discovers plugins from ./agent/plugins/) ---
 
 const registry = createRegistry();
 
@@ -83,7 +83,7 @@ let agentUnsubscribe: (() => void) | undefined;
 let notebookVisible = false;
 let mobilePanel: "chat" | "notebook" = "chat";
 let projectName: string | undefined;
-let toolContext: ToolContext = {};
+let toolContext: PluginContext = {};
 
 const notebookStore = new NotebookStore();
 
@@ -180,25 +180,18 @@ function requestCellChangeProposal(edit: CellEdit): void {
   const cell = notebookStore.cell(edit.cellId);
   if (!cell || !agent) return;
 
-  const filePaths =
-    cell.file_paths.length > 0
-      ? `\nRelevant files: ${cell.file_paths.join(", ")}`
-      : "";
+  const skill = registry.skill("propose-changes", toolContext);
+  if (!skill) return;
 
-  const prompt = [
-    `The user edited the ${cell.kind} "${cell.name}".`,
-    ``,
-    `Previous description:`,
-    `> ${edit.oldSummary}`,
-    ``,
-    `New description:`,
-    `> ${edit.newSummary}`,
-    `${filePaths}`,
-    ``,
-    `Review the relevant code and propose changes to align the implementation with the updated intent. Explain what you would change and why before making edits.`,
-  ].join("\n");
-
-  agent.prompt(prompt);
+  agent.prompt(
+    skill.prompt({
+      kind: cell.kind,
+      name: cell.name,
+      oldSummary: edit.oldSummary,
+      newSummary: edit.newSummary,
+      filePaths: cell.file_paths,
+    }),
+  );
 }
 
 // --- Re-scan after changes (Phase 3d) ---
@@ -208,17 +201,14 @@ function requestRescan(cellIds: string[]): void {
 
   const names = cellIds
     .map((id) => notebookStore.cell(id)?.name)
-    .filter(Boolean);
+    .filter(Boolean) as string[];
 
   if (names.length === 0) return;
 
-  const prompt = [
-    `The following components were recently modified: ${names.join(", ")}.`,
-    ``,
-    `Please re-analyze these components and provide an updated architecture notebook that reflects the current state. Include all cells from the previous notebook, updating the summaries of changed components. Emit a full canopy-notebook fence.`,
-  ].join("\n");
+  const skill = registry.skill("rescan-components", toolContext);
+  if (!skill) return;
 
-  agent.prompt(prompt);
+  agent.prompt(skill.prompt({ names }));
 }
 
 // --- Project directory ---
@@ -232,12 +222,11 @@ async function openProject(): Promise<void> {
     // Reinitialize agent with file system tools now available
     await initAgent();
 
-    // Auto-trigger architecture scan
-    agent.prompt(
-      `Analyze the architecture of this project ("${handle.name}"). ` +
-      `Start by exploring the directory structure and reading key files, ` +
-      `then present your findings as a canopy-notebook.`,
-    );
+    // Auto-trigger architecture scan via plugin skill
+    const scanSkill = registry.skill("scan-architecture", toolContext);
+    if (scanSkill) {
+      agent.prompt(scanSkill.prompt({ projectName: handle.name }));
+    }
 
     renderApp();
   } catch (e) {
