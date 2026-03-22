@@ -23,4 +23,7 @@ export default defineConfig({
   server: {
     port: 3100,
   },
+  test: {
+    include: ["tests/**/*.test.ts"],
+  },
 });
