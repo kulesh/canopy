@@ -17,8 +17,11 @@ import type { Agent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { html, render } from "lit";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { History, Plus, Settings } from "lucide";
+import { History, Plus, Settings, PanelLeft, PanelLeftClose } from "lucide";
 import { createCanopyAgent } from "./agent/session.js";
+import { NotebookStore } from "./notebook/store.js";
+import { findLatestNotebook } from "./notebook/parse.js";
+import { renderNotebookPanel } from "./notebook/panel.js";
 import "./app.css";
 
 // --- Storage setup ---
@@ -55,6 +58,9 @@ let chatPanel: ChatPanel;
 let currentSessionId: string | undefined;
 let currentTitle = "";
 let agentUnsubscribe: (() => void) | undefined;
+let notebookVisible = true;
+
+const notebookStore = new NotebookStore();
 
 // --- Session helpers ---
 
@@ -121,12 +127,30 @@ async function saveSession() {
   );
 }
 
+// --- Notebook extraction from agent messages ---
+
+function syncNotebookFromMessages(messages: AgentMessage[]): void {
+  const notebook = findLatestNotebook(messages);
+  if (notebook && notebook.cells.size > 0) {
+    notebookStore.load(notebook);
+    // Auto-show notebook when content arrives
+    if (!notebookVisible) {
+      notebookVisible = true;
+    }
+  }
+}
+
 // --- Agent lifecycle ---
 
 async function initAgent(initialMessages?: AgentMessage[]) {
   if (agentUnsubscribe) agentUnsubscribe();
 
   agent = await createCanopyAgent(chatPanel, initialMessages);
+
+  // If restoring a session, check for existing notebook data
+  if (initialMessages) {
+    syncNotebookFromMessages(initialMessages);
+  }
 
   agentUnsubscribe = agent.subscribe((event: any) => {
     if (event.type !== "state-update") return;
@@ -142,6 +166,10 @@ async function initAgent(initialMessages?: AgentMessage[]) {
       window.history.replaceState({}, "", url);
     }
     if (currentSessionId) saveSession();
+
+    // Check for notebook data in the latest messages
+    syncNotebookFromMessages(messages);
+
     renderApp();
   });
 }
@@ -172,9 +200,12 @@ function renderApp() {
   const app = document.getElementById("app");
   if (!app) return;
 
+  const hasNotebook = !notebookStore.empty;
+
   render(
     html`
       <div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden">
+        <!-- Header -->
         <div class="flex items-center justify-between border-b border-border shrink-0">
           <div class="flex items-center gap-2 px-4 py-1">
             ${Button({
@@ -202,6 +233,18 @@ function renderApp() {
             </span>
           </div>
           <div class="flex items-center gap-1 px-2">
+            ${hasNotebook
+              ? Button({
+                  variant: "ghost",
+                  size: "sm",
+                  children: icon(notebookVisible ? PanelLeftClose : PanelLeft, "sm"),
+                  onClick: () => {
+                    notebookVisible = !notebookVisible;
+                    renderApp();
+                  },
+                  title: notebookVisible ? "Hide Notebook" : "Show Notebook",
+                })
+              : ""}
             <theme-toggle></theme-toggle>
             ${Button({
               variant: "ghost",
@@ -213,7 +256,28 @@ function renderApp() {
             })}
           </div>
         </div>
-        ${chatPanel}
+
+        <!-- Main content: notebook + chat side by side -->
+        <div class="flex-1 flex overflow-hidden">
+          <!-- Notebook panel -->
+          ${notebookVisible
+            ? html`
+                <div class="flex flex-col border-r border-border ${hasNotebook ? 'w-1/2' : 'w-2/5'} shrink-0">
+                  <div class="px-3 py-1.5 border-b border-border/50 shrink-0">
+                    <span class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                      Architecture
+                    </span>
+                  </div>
+                  ${renderNotebookPanel(notebookStore, renderApp)}
+                </div>
+              `
+            : ""}
+
+          <!-- Chat panel -->
+          <div class="flex-1 min-w-0">
+            ${chatPanel}
+          </div>
+        </div>
       </div>
     `,
     app,
@@ -236,6 +300,9 @@ async function init() {
   );
 
   chatPanel = new ChatPanel();
+
+  // Subscribe to notebook store for re-renders
+  notebookStore.subscribe(() => renderApp());
 
   const sessionId = new URLSearchParams(window.location.search).get("session");
   if (sessionId) {
