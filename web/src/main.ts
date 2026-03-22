@@ -389,3 +389,12 @@ async function init() {
 }
 
 init();
+
+// Dev-mode test bridge — allows Playwright to inject notebook data
+if (import.meta.env.DEV) {
+  (window as any).__canopy__ = {
+    store: notebookStore,
+    renderApp,
+    get agent() { return agent; },
+  };
+}
