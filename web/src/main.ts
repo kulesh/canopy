@@ -306,7 +306,6 @@ function renderApp() {
   const showNotebook = notebookVisible && (!mobile || mobilePanel === "notebook");
   const showChat = !mobile || mobilePanel === "chat";
   const fsSupported = isFileSystemAccessSupported();
-  console.log("[canopy] fsSupported:", fsSupported);
   const displayTitle = projectName
     ? `${currentTitle || "Canopy"} — ${projectName}`
     : (currentTitle || "Canopy");
