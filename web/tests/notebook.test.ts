@@ -120,6 +120,48 @@ describe("Phase 2: Notebook parsing", () => {
     expect(parseNotebookFromMessage(msg)).toBeNull();
   });
 
+  it("parses notebook from a json code fence (fallback)", () => {
+    const msg = makeAssistantMessage(
+      `Here's the analysis:\n\n\`\`\`json\n${SAMPLE_NOTEBOOK_JSON}\n\`\`\`\n\nLet me know.`,
+    );
+    const notebook = parseNotebookFromMessage(msg);
+    expect(notebook).not.toBeNull();
+    expect(notebook!.cells.size).toBe(4);
+  });
+
+  it("parses notebook from an unmarked code fence (fallback)", () => {
+    const msg = makeAssistantMessage(
+      `Architecture:\n\n\`\`\`\n${SAMPLE_NOTEBOOK_JSON}\n\`\`\``,
+    );
+    const notebook = parseNotebookFromMessage(msg);
+    expect(notebook).not.toBeNull();
+    expect(notebook!.root_ids).toEqual(["web-app"]);
+  });
+
+  it("prefers canopy-notebook fence over json fence", () => {
+    const v2 = JSON.stringify({
+      cells: [
+        {
+          id: "v2",
+          kind: "system",
+          name: "V2",
+          summary: "From canopy-notebook fence",
+          children: [],
+          dependencies: [],
+          file_paths: [],
+          provenance: { source: "ai" },
+        },
+      ],
+      root_ids: ["v2"],
+    });
+    const msg = makeAssistantMessage(
+      `\`\`\`json\n${SAMPLE_NOTEBOOK_JSON}\n\`\`\`\n\n\`\`\`canopy-notebook\n${v2}\n\`\`\``,
+    );
+    const notebook = parseNotebookFromMessage(msg);
+    expect(notebook).not.toBeNull();
+    expect(notebook!.root_ids).toEqual(["v2"]);
+  });
+
   it("returns null when no fence is present", () => {
     const msg = makeAssistantMessage("Just some text, no notebook here.");
     expect(parseNotebookFromMessage(msg)).toBeNull();
@@ -133,6 +175,13 @@ describe("Phase 2: Notebook parsing", () => {
   it("returns null for valid JSON but invalid notebook shape", () => {
     const msg = makeAssistantMessage(
       '```canopy-notebook\n{"cells": [{"id": "x"}], "root_ids": ["x"]}\n```',
+    );
+    expect(parseNotebookFromMessage(msg)).toBeNull();
+  });
+
+  it("ignores non-notebook JSON in code fences", () => {
+    const msg = makeAssistantMessage(
+      '```json\n{"name": "foo", "version": "1.0"}\n```',
     );
     expect(parseNotebookFromMessage(msg)).toBeNull();
   });

@@ -2,14 +2,16 @@
  * Notebook Parser
  *
  * Extracts structured notebook JSON from agent messages.
- * The agent returns architecture scans as JSON wrapped in a markdown
- * code fence with language `canopy-notebook`. This is an explicit signal
- * — no heuristic guessing.
  *
- * Format:
+ * Preferred format — explicit `canopy-notebook` fence:
  *   ```canopy-notebook
  *   { "cells": [...], "root_ids": [...] }
  *   ```
+ *
+ * Fallback — any code fence (`json`, unmarked, etc.) containing
+ * valid notebook JSON. The `isValidNotebookWire` validator is strict
+ * enough (cells array with specific required fields + root_ids) that
+ * false positives are effectively impossible.
  */
 
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
@@ -24,6 +26,7 @@ import {
 } from "./types.js";
 
 const FENCE_RE = /```canopy-notebook\s*\n([\s\S]*?)```/;
+const ANY_FENCE_RE = /```(?:\w*)\s*\n([\s\S]*?)```/g;
 const CHANGES_FENCE_RE = /```canopy-changes\s*\n([\s\S]*?)```/;
 
 const VALID_KINDS: Set<string> = new Set([
@@ -70,33 +73,23 @@ function normalizeCell(raw: any): NotebookWire["cells"][number] {
   };
 }
 
-/**
- * Try to extract a Notebook from an assistant message's text content.
- * Returns null if no valid notebook JSON is found.
- */
-export function parseNotebookFromMessage(
-  message: AgentMessage,
-): Notebook | null {
-  if (message.role !== "assistant") return null;
-
+/** Extract text from an agent message's content. */
+function extractText(message: AgentMessage): string | null {
   const content = message.content;
-  const text =
-    typeof content === "string"
-      ? content
-      : Array.isArray(content)
-        ? (content as any[])
-            .filter((b: any) => b.type === "text")
-            .map((b: any) => b.text ?? "")
-            .join("\n")
-        : null;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return (content as any[])
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text ?? "")
+      .join("\n") || null;
+  }
+  return null;
+}
 
-  if (!text) return null;
-
-  const match = FENCE_RE.exec(text);
-  if (!match) return null;
-
+/** Try to parse a JSON string as a valid notebook. */
+function tryParseNotebook(json: string): Notebook | null {
   try {
-    const parsed = JSON.parse(match[1]);
+    const parsed = JSON.parse(json);
     if (!isValidNotebookWire(parsed)) return null;
 
     const wire: NotebookWire = {
@@ -108,6 +101,39 @@ export function parseNotebookFromMessage(
   } catch {
     return null;
   }
+}
+
+/**
+ * Try to extract a Notebook from an assistant message's text content.
+ *
+ * Strategy (first match wins):
+ * 1. Explicit `canopy-notebook` fence
+ * 2. Any code fence containing valid notebook JSON
+ */
+export function parseNotebookFromMessage(
+  message: AgentMessage,
+): Notebook | null {
+  if (message.role !== "assistant") return null;
+
+  const text = extractText(message);
+  if (!text) return null;
+
+  // Preferred: explicit canopy-notebook fence
+  const exact = FENCE_RE.exec(text);
+  if (exact) {
+    const nb = tryParseNotebook(exact[1]);
+    if (nb) return nb;
+  }
+
+  // Fallback: any code fence with valid notebook JSON
+  const fallback = new RegExp(ANY_FENCE_RE.source, ANY_FENCE_RE.flags);
+  let match: RegExpExecArray | null;
+  while ((match = fallback.exec(text)) !== null) {
+    const nb = tryParseNotebook(match[1]);
+    if (nb) return nb;
+  }
+
+  return null;
 }
 
 /**
@@ -164,17 +190,7 @@ export function parseChangesFromMessage(
 ): ChangeSet | null {
   if (message.role !== "assistant") return null;
 
-  const content = message.content;
-  const text =
-    typeof content === "string"
-      ? content
-      : Array.isArray(content)
-        ? (content as any[])
-            .filter((b: any) => b.type === "text")
-            .map((b: any) => b.text ?? "")
-            .join("\n")
-        : null;
-
+  const text = extractText(message);
   if (!text) return null;
 
   const match = CHANGES_FENCE_RE.exec(text);

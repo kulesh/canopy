@@ -122,7 +122,17 @@ function hasConversation(messages: AgentMessage[]): boolean {
 }
 
 async function saveSession() {
-  if (!storage.sessions || !currentSessionId || !agent || !currentTitle) return;
+  if (!storage.sessions || !currentSessionId || !agent || !currentTitle) {
+    if (agent && hasConversation(agent.state.messages)) {
+      console.warn("[canopy] saveSession skipped — missing:",
+        !storage.sessions && "storage.sessions",
+        !currentSessionId && "sessionId",
+        !agent && "agent",
+        !currentTitle && "title",
+      );
+    }
+    return;
+  }
   const state = agent.state;
   if (!hasConversation(state.messages)) return;
 
