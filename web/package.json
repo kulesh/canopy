@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --exclude tests/live-agent.test.ts",
+    "test:live": "vitest run tests/live-agent.test.ts"
   },
   "dependencies": {
     "@mariozechner/mini-lit": "^0.2.1",
