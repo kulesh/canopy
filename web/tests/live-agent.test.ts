@@ -8,10 +8,13 @@
  * Requires ANTHROPIC_API_KEY in the root .env file.
  * Skips gracefully if no key is available.
  *
- * Run explicitly:  npx vitest run tests/live-agent.test.ts
+ * If Node can't reach api.anthropic.com directly (sandboxed
+ * environments), a curl-based proxy relays API traffic.
+ *
+ * Run explicitly:  npm run test:live
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@mariozechner/pi-agent-core";
@@ -20,6 +23,7 @@ import { createRegistry, type PluginContext } from "../src/agent/plugins.js";
 import { NodeDirectoryHandle } from "./node-fs-handle.js";
 import { findLatestNotebook } from "../src/notebook/parse.js";
 import { NotebookStore } from "../src/notebook/store.js";
+import { startCurlProxy, type CurlProxy } from "./curl-proxy.js";
 
 // --- Load API key from .env into process.env ---
 
@@ -39,11 +43,29 @@ function loadEnv(): string | undefined {
 const API_KEY = loadEnv();
 const WEB_SRC = path.resolve(__dirname, "../src");
 
+// --- Connectivity check ---
+
+async function canReachApi(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5_000);
+    await fetch("https://api.anthropic.com", { signal: controller.signal });
+    clearTimeout(timeout);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // --- Test ---
 
 describe("Live agent: Canopy scans itself", () => {
-  // Skip if no key — CI without secrets, or local dev without .env
   const run = API_KEY ? it : it.skip;
+  let proxy: CurlProxy | null = null;
+
+  afterAll(async () => {
+    if (proxy) await proxy.stop();
+  });
 
   run(
     "agent analyzes web/src/ and emits a valid canopy-notebook",
@@ -71,16 +93,24 @@ describe("Live agent: Canopy scans itself", () => {
       const systemPrompt = `${basePrompt}\n\n${registry.systemPrompt(ctx)}`;
       const tools = registry.resolveTools(ctx);
 
-      // Create agent with real API key
+      // Configure model — use curl proxy if Node can't reach the API directly
+      const model = getModel("anthropic", "claude-sonnet-4-5-20250929");
+      const directAccess = await canReachApi();
+      if (!directAccess) {
+        console.log("[live-agent] Node cannot reach api.anthropic.com — starting curl proxy");
+        proxy = await startCurlProxy("api.anthropic.com");
+        model.baseUrl = proxy.baseUrl;
+        console.log(`[live-agent] Proxy listening at ${proxy.baseUrl}`);
+      }
+
       const agent = new Agent({
         initialState: {
           systemPrompt,
-          model: getModel("anthropic", "claude-sonnet-4-5-20250929"),
+          model,
           thinkingLevel: "off",
           messages: [],
           tools,
         },
-        // API key is read from process.env.ANTHROPIC_API_KEY by the Pi SDK
       });
 
       // Send the scan prompt via the skill
@@ -141,14 +171,10 @@ describe("Live agent: Canopy scans itself", () => {
       // Every child reference must resolve
       for (const [, cell] of notebook!.cells) {
         for (const childId of cell.children) {
-          expect(
-            notebook!.cells.has(childId),
-          ).toBe(true);
+          expect(notebook!.cells.has(childId)).toBe(true);
         }
         for (const depId of cell.dependencies) {
-          expect(
-            notebook!.cells.has(depId),
-          ).toBe(true);
+          expect(notebook!.cells.has(depId)).toBe(true);
         }
       }
 

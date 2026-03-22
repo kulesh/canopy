@@ -484,5 +484,8 @@ if (import.meta.env.DEV) {
       toolContext = { projectHandle: handle };
       renderApp();
     },
+    async setApiKey(provider: string, key: string) {
+      await providerKeys.set(provider, key);
+    },
   };
 }
