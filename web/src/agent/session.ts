@@ -52,7 +52,6 @@ export async function createCanopyAgent(
       model: getModel("anthropic", "claude-sonnet-4-5-20250929"),
       thinkingLevel: "off",
       messages: initialMessages ?? [],
-      tools,
     },
   });
 
@@ -60,6 +59,7 @@ export async function createCanopyAgent(
     onApiKeyRequired: async (provider: string) => {
       return await ApiKeyPromptDialog.prompt(provider);
     },
+    toolsFactory: (_agent, _agentInterface, _artifactsPanel, _runtimeProvidersFactory) => tools,
   });
 
   return agent;
