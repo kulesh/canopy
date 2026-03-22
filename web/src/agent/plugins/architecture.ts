@@ -39,6 +39,8 @@ When asked to analyze architecture:
 
 const NOTEBOOK_FORMAT = `## Structured Output
 
+CRITICAL: When producing architecture analysis, you MUST emit the notebook JSON directly in your response text using a canopy-notebook code fence. Do NOT create artifacts for this — the notebook fence is parsed by the UI to render an interactive panel. If you use an artifact, the notebook panel will not appear.
+
 When the user asks you to "show the architecture," "analyze this project," or similar requests for architectural overview, you MUST return a structured notebook alongside your explanation. Wrap the notebook in a canopy-notebook code fence:
 
 \`\`\`canopy-notebook
