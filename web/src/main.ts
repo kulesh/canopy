@@ -19,7 +19,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { History, Plus, Settings, PanelLeft, PanelLeftClose } from "lucide";
 import { createCanopyAgent } from "./agent/session.js";
-import { NotebookStore } from "./notebook/store.js";
+import { NotebookStore, type CellEdit } from "./notebook/store.js";
 import { findLatestNotebook } from "./notebook/parse.js";
 import { renderNotebookPanel } from "./notebook/panel.js";
 import "./app.css";
@@ -138,6 +138,33 @@ function syncNotebookFromMessages(messages: AgentMessage[]): void {
       notebookVisible = true;
     }
   }
+}
+
+// --- Cell edit → agent proposal (Phase 3b) ---
+
+function requestCellChangeProposal(edit: CellEdit): void {
+  const cell = notebookStore.cell(edit.cellId);
+  if (!cell || !agent) return;
+
+  const filePaths =
+    cell.file_paths.length > 0
+      ? `\nRelevant files: ${cell.file_paths.join(", ")}`
+      : "";
+
+  const prompt = [
+    `The user edited the ${cell.kind} "${cell.name}".`,
+    ``,
+    `Previous description:`,
+    `> ${edit.oldSummary}`,
+    ``,
+    `New description:`,
+    `> ${edit.newSummary}`,
+    `${filePaths}`,
+    ``,
+    `Review the relevant code and propose changes to align the implementation with the updated intent. Explain what you would change and why before making edits.`,
+  ].join("\n");
+
+  agent.prompt(prompt);
 }
 
 // --- Agent lifecycle ---
@@ -304,14 +331,7 @@ async function init() {
   // Subscribe to notebook store for re-renders and edit events
   notebookStore.subscribe((event) => {
     if (event.type === "cell-edited") {
-      const { cellId, oldSummary, newSummary } = event.edit;
-      const cell = notebookStore.cell(cellId);
-      const name = cell?.name ?? cellId;
-      console.log(
-        `[canopy] Cell edited: "${name}"\n  old: ${oldSummary}\n  new: ${newSummary}`,
-      );
-      // TODO (Phase 3b): Send to agent:
-      // `User changed ${name} from "${oldSummary}" to "${newSummary}". Propose code changes.`
+      requestCellChangeProposal(event.edit);
     }
     renderApp();
   });
