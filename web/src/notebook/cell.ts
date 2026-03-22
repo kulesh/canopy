@@ -10,7 +10,7 @@
  */
 
 import { html, type TemplateResult } from "lit";
-import type { NotebookCell, CellKind } from "./types.js";
+import type { NotebookCell, CellKind, ChangeProposal } from "./types.js";
 import type { NotebookStore } from "./store.js";
 
 const KIND_COLORS: Record<CellKind, string> = {
@@ -113,6 +113,59 @@ function renderSummary(
   `;
 }
 
+function renderChangeProposal(
+  proposal: ChangeProposal,
+  store: NotebookStore,
+  onRender: () => void,
+): TemplateResult {
+  return html`
+    <div class="rounded border border-amber-500/30 bg-amber-500/5 p-2 space-y-2">
+      <div class="flex items-center justify-between">
+        <span class="text-xs font-medium text-amber-300">
+          Proposed changes
+        </span>
+        <button
+          class="text-[10px] px-1.5 py-0.5 rounded bg-secondary hover:bg-secondary/80 text-muted-foreground cursor-pointer"
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            store.dismissChange(proposal.cell_id);
+            onRender();
+          }}
+        >
+          dismiss
+        </button>
+      </div>
+      <p class="text-xs text-muted-foreground leading-relaxed">
+        ${proposal.summary}
+      </p>
+      ${proposal.changes.length > 0
+        ? html`
+            <div class="space-y-1">
+              ${proposal.changes.map(
+                (change) => html`
+                  <div class="text-xs font-mono rounded bg-secondary/40 p-1.5 space-y-1">
+                    <div class="text-muted-foreground/80">
+                      ${change.file_path}
+                    </div>
+                    <div class="text-muted-foreground">
+                      ${change.description}
+                    </div>
+                    ${change.before
+                      ? html`<pre class="text-red-400/70 bg-red-500/5 rounded px-1.5 py-1 overflow-x-auto whitespace-pre-wrap">- ${change.before}</pre>`
+                      : ""}
+                    ${change.after
+                      ? html`<pre class="text-green-400/70 bg-green-500/5 rounded px-1.5 py-1 overflow-x-auto whitespace-pre-wrap">+ ${change.after}</pre>`
+                      : ""}
+                  </div>
+                `,
+              )}
+            </div>
+          `
+        : ""}
+    </div>
+  `;
+}
+
 export function renderCell(
   cell: NotebookCell,
   store: NotebookStore,
@@ -124,6 +177,7 @@ export function renderCell(
   const hasChildren = cell.children.length > 0;
   const chevron = hasChildren ? (expanded ? "▾" : "▸") : " ";
   const depCount = cell.dependencies.length;
+  const change = store.changeFor(cell.id);
 
   const borderClass = DEPTH_BORDERS[cell.kind];
   const focusRing = focused ? "ring-1 ring-primary/50" : "";
@@ -155,6 +209,11 @@ export function renderCell(
           ${cell.name}
         </span>
         <span class="flex items-center gap-1.5 ml-auto shrink-0">
+          ${change
+            ? html`<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border bg-amber-500/20 text-amber-300 border-amber-500/30">
+                changes
+              </span>`
+            : ""}
           ${provenanceBadge(cell.provenance.source)}
           ${kindBadge(cell.kind)}
           ${depCount > 0
@@ -173,6 +232,9 @@ export function renderCell(
             <div class="px-3 pb-3 space-y-2 border-t border-border/50">
               <!-- Summary -->
               ${renderSummary(cell, store, onRender)}
+
+              <!-- Change proposal -->
+              ${change ? renderChangeProposal(change, store, onRender) : ""}
 
               <!-- Dependencies -->
               ${cell.dependencies.length > 0

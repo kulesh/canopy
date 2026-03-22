@@ -5,7 +5,7 @@
  * Single source of truth for the cell tree.
  */
 
-import type { Notebook, NotebookCell } from "./types.js";
+import type { Notebook, NotebookCell, ChangeSet, ChangeProposal } from "./types.js";
 
 export type CellEdit = {
   cellId: string;
@@ -17,7 +17,10 @@ export type NotebookEvent =
   | { type: "loaded"; notebook: Notebook }
   | { type: "cell-toggled"; cellId: string; expanded: boolean }
   | { type: "focus-changed"; cellId: string | null }
-  | { type: "cell-edited"; edit: CellEdit };
+  | { type: "cell-edited"; edit: CellEdit }
+  | { type: "changes-loaded"; changeSet: ChangeSet }
+  | { type: "changes-dismissed"; cellId: string }
+  | { type: "changes-cleared" };
 
 export type NotebookListener = (event: NotebookEvent) => void;
 
@@ -27,6 +30,7 @@ export class NotebookStore {
   private focusedCellId: string | null = null;
   private editingId: string | null = null;
   private draft: string = "";
+  private changes = new Map<string, ChangeProposal>();
   private listeners: NotebookListener[] = [];
 
   get empty(): boolean {
@@ -131,6 +135,37 @@ export class NotebookStore {
   cancelEdit(): void {
     this.editingId = null;
     this.draft = "";
+  }
+
+  // --- Change proposals ---
+
+  loadChanges(changeSet: ChangeSet): void {
+    this.changes.clear();
+    for (const proposal of changeSet.proposals) {
+      // Only track proposals for cells that exist in the notebook
+      if (this.notebook.cells.has(proposal.cell_id)) {
+        this.changes.set(proposal.cell_id, proposal);
+      }
+    }
+    this.emit({ type: "changes-loaded", changeSet });
+  }
+
+  changeFor(cellId: string): ChangeProposal | undefined {
+    return this.changes.get(cellId);
+  }
+
+  get hasChanges(): boolean {
+    return this.changes.size > 0;
+  }
+
+  dismissChange(cellId: string): void {
+    this.changes.delete(cellId);
+    this.emit({ type: "changes-dismissed", cellId });
+  }
+
+  clearChanges(): void {
+    this.changes.clear();
+    this.emit({ type: "changes-cleared" });
   }
 
   /**

@@ -41,6 +41,29 @@ export interface NotebookWire {
   root_ids: string[];
 }
 
+// --- Change proposals (Phase 3c) ---
+
+export interface FileChange {
+  file_path: string;
+  description: string;
+  before?: string;
+  after?: string;
+}
+
+export interface ChangeProposal {
+  cell_id: string;
+  summary: string;
+  changes: FileChange[];
+}
+
+export interface ChangeSet {
+  proposals: ChangeProposal[];
+}
+
+export type ChangeSetWire = ChangeSet;
+
+// --- Wire format ---
+
 export type NotebookCellWire = Omit<NotebookCell, never>;
 
 export function notebookFromWire(wire: NotebookWire): Notebook {

@@ -48,7 +48,37 @@ Rules for structured output:
 5. Start with a system cell, decompose into containers, then components
 6. Only go to code_unit depth when the user asks to drill down
 
-Always include conversational text before or after the notebook fence to explain your findings. The notebook is the structured view; the text is the narrative.`;
+Always include conversational text before or after the notebook fence to explain your findings. The notebook is the structured view; the text is the narrative.
+
+## Change Proposals
+
+When the user edits a cell's description and you propose code changes, you MUST include a structured change proposal alongside your explanation. Wrap it in a canopy-changes code fence:
+
+\`\`\`canopy-changes
+{
+  "proposals": [
+    {
+      "cell_id": "the-cell-id-that-was-edited",
+      "summary": "Brief description of what changes are needed",
+      "changes": [
+        {
+          "file_path": "src/path/to/file.ts",
+          "description": "What this specific file change does",
+          "before": "// optional: the relevant code before the change",
+          "after": "// optional: the relevant code after the change"
+        }
+      ]
+    }
+  ]
+}
+\`\`\`
+
+Rules for change proposals:
+1. The \`cell_id\` must match an existing cell in the notebook
+2. Include concrete file paths and descriptions for each change
+3. Use \`before\`/\`after\` snippets to show the key diff — keep them short (relevant lines only, not entire files)
+4. If the change affects multiple cells, include multiple proposals
+5. Always explain your reasoning in conversational text alongside the structured fence`;
 
 export async function createCanopyAgent(
   chatPanel: ChatPanel,

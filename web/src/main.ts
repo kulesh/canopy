@@ -20,7 +20,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { History, Plus, Settings, PanelLeft, PanelLeftClose } from "lucide";
 import { createCanopyAgent } from "./agent/session.js";
 import { NotebookStore, type CellEdit } from "./notebook/store.js";
-import { findLatestNotebook } from "./notebook/parse.js";
+import { findLatestNotebook, findLatestChanges } from "./notebook/parse.js";
 import { renderNotebookPanel } from "./notebook/panel.js";
 import "./app.css";
 
@@ -133,10 +133,15 @@ function syncNotebookFromMessages(messages: AgentMessage[]): void {
   const notebook = findLatestNotebook(messages);
   if (notebook && notebook.cells.size > 0) {
     notebookStore.load(notebook);
-    // Auto-show notebook when content arrives
     if (!notebookVisible) {
       notebookVisible = true;
     }
+  }
+
+  // Sync change proposals (Phase 3c)
+  const changeSet = findLatestChanges(messages);
+  if (changeSet && changeSet.proposals.length > 0) {
+    notebookStore.loadChanges(changeSet);
   }
 }
 
@@ -162,6 +167,26 @@ function requestCellChangeProposal(edit: CellEdit): void {
     `${filePaths}`,
     ``,
     `Review the relevant code and propose changes to align the implementation with the updated intent. Explain what you would change and why before making edits.`,
+  ].join("\n");
+
+  agent.prompt(prompt);
+}
+
+// --- Re-scan after changes (Phase 3d) ---
+
+function requestRescan(cellIds: string[]): void {
+  if (!agent || cellIds.length === 0) return;
+
+  const names = cellIds
+    .map((id) => notebookStore.cell(id)?.name)
+    .filter(Boolean);
+
+  if (names.length === 0) return;
+
+  const prompt = [
+    `The following components were recently modified: ${names.join(", ")}.`,
+    ``,
+    `Please re-analyze these components and provide an updated architecture notebook that reflects the current state. Include all cells from the previous notebook, updating the summaries of changed components. Emit a full canopy-notebook fence.`,
   ].join("\n");
 
   agent.prompt(prompt);
@@ -328,10 +353,23 @@ async function init() {
 
   chatPanel = new ChatPanel();
 
-  // Subscribe to notebook store for re-renders and edit events
+  // Subscribe to notebook store for re-renders, edits, and change lifecycle
+  const dismissedCells: string[] = [];
+
   notebookStore.subscribe((event) => {
     if (event.type === "cell-edited") {
       requestCellChangeProposal(event.edit);
+    }
+    if (event.type === "changes-dismissed") {
+      dismissedCells.push(event.cellId);
+      // When all changes have been reviewed, trigger re-scan
+      if (!notebookStore.hasChanges && dismissedCells.length > 0) {
+        requestRescan([...dismissedCells]);
+        dismissedCells.length = 0;
+      }
+    }
+    if (event.type === "changes-loaded") {
+      dismissedCells.length = 0;
     }
     renderApp();
   });
