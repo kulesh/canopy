@@ -19,5 +19,9 @@ __pycache__/
 node_modules/
 web/dist/
 
+# Secrets
+.env
+.env.*
+
 # Local scratch
 tmp/
