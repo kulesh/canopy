@@ -110,6 +110,22 @@ export default defineConfig({
       manifest: false, // We manage our own manifest.json
     }),
   ],
+  build: {
+    target: "esnext",
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("pdfjs-dist")) return "vendor-pdf";
+          if (id.includes("pi-web-ui") || id.includes("mini-lit") || id.includes("/lit/"))
+            return "vendor-pi-ui";
+          // Keep provider modules (anthropic, mistral, etc.) as separate lazy chunks
+          if (id.includes("pi-ai/dist/providers")) return;
+          if (id.includes("pi-ai") || id.includes("pi-agent-core"))
+            return "vendor-pi-ai";
+        },
+      },
+    },
+  },
   server: {
     port: 3100,
   },
