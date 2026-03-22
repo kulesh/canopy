@@ -10,6 +10,14 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   </head>
   <body class="bg-background">
+    <!-- Fix #1: Shim process for Pi SDK's unguarded process.env references -->
+    <script>window.process={env:{},versions:{}};</script>
+    <!-- Fix #8: Respect system dark mode preference -->
+    <script>
+      if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+        document.documentElement.classList.add("dark");
+      }
+    </script>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -104,7 +104,7 @@ function handleKeyboard(
       e.preventDefault();
       if (store.focusedId) {
         const cell = store.cell(store.focusedId);
-        if (cell && cell.children.length > 0 && !store.isExpanded(store.focusedId)) {
+        if (cell && !store.isExpanded(store.focusedId)) {
           store.toggle(store.focusedId);
           onRender();
         }

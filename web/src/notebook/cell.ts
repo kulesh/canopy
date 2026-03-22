@@ -91,9 +91,12 @@ function renderSummary(
     `;
   }
 
+  const justEdited = store.wasJustEdited(cell.id);
+  const flashClass = justEdited ? "animate-[flash_1s_ease-out]" : "";
+
   return html`
     <p
-      class="text-sm text-muted-foreground leading-relaxed pt-2 cursor-text rounded px-1 -mx-1 hover:bg-secondary/30 transition-colors"
+      class="text-sm text-muted-foreground leading-relaxed pt-2 cursor-text rounded px-1 -mx-1 hover:bg-secondary/30 transition-colors ${flashClass}"
       @dblclick=${(e: Event) => {
         e.stopPropagation();
         store.startEdit(cell.id);
@@ -151,10 +154,10 @@ function renderChangeProposal(
                       ${change.description}
                     </div>
                     ${change.before
-                      ? html`<pre class="text-red-400/70 bg-red-500/5 rounded px-1.5 py-1 overflow-x-auto whitespace-pre-wrap">- ${change.before}</pre>`
+                      ? html`<pre class="text-red-400/70 bg-red-500/5 rounded px-1.5 py-1 overflow-x-auto whitespace-pre-wrap">- ${change.before.replace(/\\n/g, "\n")}</pre>`
                       : ""}
                     ${change.after
-                      ? html`<pre class="text-green-400/70 bg-green-500/5 rounded px-1.5 py-1 overflow-x-auto whitespace-pre-wrap">+ ${change.after}</pre>`
+                      ? html`<pre class="text-green-400/70 bg-green-500/5 rounded px-1.5 py-1 overflow-x-auto whitespace-pre-wrap">+ ${change.after.replace(/\\n/g, "\n")}</pre>`
                       : ""}
                   </div>
                 `,
@@ -175,7 +178,8 @@ export function renderCell(
   const expanded = store.isExpanded(cell.id);
   const focused = store.focusedId === cell.id;
   const hasChildren = cell.children.length > 0;
-  const chevron = hasChildren ? (expanded ? "▾" : "▸") : " ";
+  const hasBody = true; // Every cell has a summary; deps/files may also exist
+  const chevron = expanded ? "▾" : "▸";
   const depCount = cell.dependencies.length;
   const change = store.changeFor(cell.id);
 
@@ -194,7 +198,7 @@ export function renderCell(
         class="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-secondary/50 transition-colors cursor-pointer"
         @click=${() => {
           store.focus(cell.id);
-          if (hasChildren) store.toggle(cell.id);
+          store.toggle(cell.id);
           onRender();
         }}
         @focus=${() => {

@@ -1,1 +1,6 @@
 @import "@mariozechner/pi-web-ui/app.css";
+
+@keyframes flash {
+  0% { background-color: oklch(0.8 0.15 85 / 0.3); }
+  100% { background-color: transparent; }
+}

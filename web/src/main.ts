@@ -51,6 +51,22 @@ sessions.setBackend(backend);
 const storage = new AppStorage(settings, providerKeys, sessions, customProviders, backend);
 setAppStorage(storage);
 
+// Fix #2: Enable CORS proxy for dev server.
+// Pi SDK routes API calls through `<proxyUrl>/?url=<target>`.
+// Vite's corsProxy plugin handles this server-side.
+async function ensureProxySettings(): Promise<void> {
+  try {
+    const proxyEnabled = await settings.get("proxy.enabled");
+    if (!proxyEnabled) {
+      await settings.set("proxy.enabled", true);
+      await settings.set("proxy.url", `${window.location.origin}/cors-proxy`);
+    }
+  } catch {
+    // Storage not ready yet — retry once
+    setTimeout(ensureProxySettings, 500);
+  }
+}
+
 // --- App state ---
 
 let agent: Agent;
@@ -58,9 +74,14 @@ let chatPanel: ChatPanel;
 let currentSessionId: string | undefined;
 let currentTitle = "";
 let agentUnsubscribe: (() => void) | undefined;
-let notebookVisible = true;
+let notebookVisible = false;
+let mobilePanel: "chat" | "notebook" = "chat";
 
 const notebookStore = new NotebookStore();
+
+function isMobile(): boolean {
+  return window.innerWidth < 768;
+}
 
 // --- Session helpers ---
 
@@ -253,6 +274,9 @@ function renderApp() {
   if (!app) return;
 
   const hasNotebook = !notebookStore.empty;
+  const mobile = isMobile();
+  const showNotebook = notebookVisible && (!mobile || mobilePanel === "notebook");
+  const showChat = !mobile || mobilePanel === "chat";
 
   render(
     html`
@@ -291,10 +315,17 @@ function renderApp() {
                   size: "sm",
                   children: icon(notebookVisible ? PanelLeftClose : PanelLeft, "sm"),
                   onClick: () => {
-                    notebookVisible = !notebookVisible;
+                    if (mobile) {
+                      // On mobile, toggle between panels
+                      mobilePanel = mobilePanel === "chat" ? "notebook" : "chat";
+                    } else {
+                      notebookVisible = !notebookVisible;
+                    }
                     renderApp();
                   },
-                  title: notebookVisible ? "Hide Notebook" : "Show Notebook",
+                  title: mobile
+                    ? (mobilePanel === "chat" ? "Show Notebook" : "Show Chat")
+                    : (notebookVisible ? "Hide Notebook" : "Show Notebook"),
                 })
               : ""}
             <theme-toggle></theme-toggle>
@@ -309,12 +340,12 @@ function renderApp() {
           </div>
         </div>
 
-        <!-- Main content: notebook + chat side by side -->
+        <!-- Main content: notebook + chat side by side (desktop) or one at a time (mobile) -->
         <div class="flex-1 flex overflow-hidden">
           <!-- Notebook panel -->
-          ${notebookVisible
+          ${showNotebook
             ? html`
-                <div class="flex flex-col border-r border-border ${hasNotebook ? 'w-1/2' : 'w-2/5'} shrink-0">
+                <div class="flex flex-col border-r border-border ${mobile ? 'w-full' : hasNotebook ? 'w-1/2' : 'w-2/5'} shrink-0">
                   <div class="px-3 py-1.5 border-b border-border/50 shrink-0">
                     <span class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
                       Architecture
@@ -326,9 +357,13 @@ function renderApp() {
             : ""}
 
           <!-- Chat panel -->
-          <div class="flex-1 min-w-0">
-            ${chatPanel}
-          </div>
+          ${showChat
+            ? html`
+                <div class="flex-1 min-w-0">
+                  ${chatPanel}
+                </div>
+              `
+            : ""}
         </div>
       </div>
     `,
@@ -352,6 +387,9 @@ async function init() {
   );
 
   chatPanel = new ChatPanel();
+
+  // Enable CORS proxy for dev
+  ensureProxySettings();
 
   // Subscribe to notebook store for re-renders, edits, and change lifecycle
   const dismissedCells: string[] = [];
@@ -396,5 +434,7 @@ if (import.meta.env.DEV) {
     store: notebookStore,
     renderApp,
     get agent() { return agent; },
+    showNotebook() { notebookVisible = true; renderApp(); },
+    hideNotebook() { notebookVisible = false; renderApp(); },
   };
 }
