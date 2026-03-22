@@ -199,6 +199,7 @@ describe("Architecture plugin: skills", () => {
     expect(prompt).toContain("Old description");
     expect(prompt).toContain("New description");
     expect(prompt).toContain("src/auth.ts");
+    expect(prompt).toContain("canopy-changes");
   });
 
   it("provides rescan-components skill", () => {

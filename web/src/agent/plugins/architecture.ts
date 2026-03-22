@@ -140,7 +140,7 @@ function createSkills(): Skill[] {
           `> ${newSummary}`,
           `${fileSection}`,
           ``,
-          `Review the relevant code and propose changes to align the implementation with the updated intent. Explain what you would change and why before making edits.`,
+          `Review the relevant code and propose changes to align the implementation with the updated intent. Explain what you would change and why, then emit a canopy-changes fence with your structured proposal.`,
         ].join("\n");
       },
     },
