@@ -18,7 +18,7 @@ import { html, render } from "lit";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { History, Plus, Settings, PanelLeft, PanelLeftClose, FolderOpen } from "lucide";
-import { createCanopyAgent } from "./agent/session.js";
+import { createCanopyAgent, saveModelPreference, resolveDefaultModel } from "./agent/session.js";
 import { createRegistry, type PluginContext } from "./agent/plugins.js";
 import { selectProjectDirectory, isFileSystemAccessSupported } from "./agent/project.js";
 import { NotebookStore, type CellEdit } from "./notebook/store.js";
@@ -126,34 +126,38 @@ async function saveSession() {
   const state = agent.state;
   if (!hasConversation(state.messages)) return;
 
-  await storage.sessions.save(
-    {
-      id: currentSessionId,
-      title: currentTitle,
-      model: state.model!,
-      thinkingLevel: state.thinkingLevel,
-      messages: state.messages,
-      createdAt: new Date().toISOString(),
-      lastModified: new Date().toISOString(),
-    },
-    {
-      id: currentSessionId,
-      title: currentTitle,
-      createdAt: new Date().toISOString(),
-      lastModified: new Date().toISOString(),
-      messageCount: state.messages.length,
-      usage: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  try {
+    await storage.sessions.save(
+      {
+        id: currentSessionId,
+        title: currentTitle,
+        model: state.model!,
+        thinkingLevel: state.thinkingLevel,
+        messages: state.messages,
+        createdAt: new Date().toISOString(),
+        lastModified: new Date().toISOString(),
       },
-      thinkingLevel: state.thinkingLevel,
-      preview: titleFromMessages(state.messages),
-    },
-  );
+      {
+        id: currentSessionId,
+        title: currentTitle,
+        createdAt: new Date().toISOString(),
+        lastModified: new Date().toISOString(),
+        messageCount: state.messages.length,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        thinkingLevel: state.thinkingLevel,
+        preview: titleFromMessages(state.messages),
+      },
+    );
+  } catch (e) {
+    console.error("[canopy] Failed to save session:", e);
+  }
 }
 
 // --- Notebook extraction from agent messages ---
@@ -241,11 +245,14 @@ async function openProject(): Promise<void> {
 async function initAgent(initialMessages?: AgentMessage[]) {
   if (agentUnsubscribe) agentUnsubscribe();
 
+  const model = await resolveDefaultModel(settings);
+
   agent = await createCanopyAgent({
     chatPanel,
     registry,
     toolContext,
     initialMessages,
+    model,
   });
 
   // If restoring a session, check for existing notebook data
@@ -253,9 +260,18 @@ async function initAgent(initialMessages?: AgentMessage[]) {
     syncNotebookFromMessages(initialMessages);
   }
 
+  let lastModelId = agent.state.model?.id;
+
   agentUnsubscribe = agent.subscribe((event: any) => {
     if (event.type !== "state-update") return;
     const messages = event.state.messages;
+
+    // Persist model preference when user changes it
+    const currentModelId = event.state.model?.id;
+    if (currentModelId && currentModelId !== lastModelId) {
+      lastModelId = currentModelId;
+      saveModelPreference(settings, event.state.model);
+    }
 
     if (!currentTitle && hasConversation(messages)) {
       currentTitle = titleFromMessages(messages);

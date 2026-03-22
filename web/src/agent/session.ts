@@ -1,10 +1,48 @@
 import { Agent } from "@mariozechner/pi-agent-core";
+import type { Model } from "@mariozechner/pi-ai";
 import { getModel } from "@mariozechner/pi-ai";
 import {
   ApiKeyPromptDialog,
   type ChatPanel,
+  type SettingsStore,
 } from "@mariozechner/pi-web-ui";
 import type { PluginRegistry, PluginContext } from "./plugins.js";
+
+// --- Default model ---
+
+const FALLBACK_PROVIDER = "anthropic";
+const FALLBACK_MODEL_ID = "claude-sonnet-4-5-20250929";
+
+interface ModelPreference {
+  provider: string;
+  modelId: string;
+}
+
+/** Persist the user's model choice so new sessions start with it. */
+export async function saveModelPreference(
+  settings: SettingsStore,
+  model: Model<any>,
+): Promise<void> {
+  await settings.set<ModelPreference>("model.default", {
+    provider: model.provider,
+    modelId: model.id,
+  });
+}
+
+/** Resolve the user's preferred model, falling back to the built-in default. */
+export async function resolveDefaultModel(
+  settings: SettingsStore,
+): Promise<Model<any>> {
+  const pref = await settings.get<ModelPreference>("model.default");
+  if (pref) {
+    const model = (getModel as (p: string, id: string) => Model<any> | undefined)(
+      pref.provider,
+      pref.modelId,
+    );
+    if (model) return model;
+  }
+  return getModel(FALLBACK_PROVIDER, FALLBACK_MODEL_ID)!;
+}
 
 // --- System prompt ---
 
@@ -37,19 +75,20 @@ export interface CreateAgentOptions {
   registry?: PluginRegistry;
   toolContext?: PluginContext;
   initialMessages?: any[];
+  model: Model<any>;
 }
 
 export async function createCanopyAgent(
   options: CreateAgentOptions,
 ): Promise<Agent> {
-  const { chatPanel, registry, toolContext, initialMessages } = options;
+  const { chatPanel, registry, toolContext, initialMessages, model } = options;
   const ctx = toolContext ?? {};
   const tools = registry ? registry.resolveTools(ctx) : [];
 
   const agent = new Agent({
     initialState: {
       systemPrompt: buildSystemPrompt(ctx, registry),
-      model: getModel("anthropic", "claude-sonnet-4-5-20250929"),
+      model,
       thinkingLevel: "off",
       messages: initialMessages ?? [],
     },
