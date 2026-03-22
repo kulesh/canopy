@@ -15,5 +15,9 @@ target/
 __pycache__/
 *.pyc
 
+# Node.js
+node_modules/
+web/dist/
+
 # Local scratch
 tmp/
