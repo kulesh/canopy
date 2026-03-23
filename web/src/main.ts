@@ -346,14 +346,17 @@ async function initAgent(initialMessages?: AgentMessage[]) {
   let lastModelId = agent.state.model?.id;
 
   agentUnsubscribe = agent.subscribe((event: any) => {
-    if (event.type !== "state-update") return;
-    const messages = event.state.messages;
+    // Agent emits: agent_start/end, turn_start/end, message_start/update/end,
+    // tool_execution_start/update/end. We act on message_end and turn_end —
+    // these are the points where agent.state.messages is fully updated.
+    if (event.type !== "message_end" && event.type !== "turn_end") return;
+    const messages = agent.state.messages;
 
     // Persist model preference when user changes it
-    const currentModelId = event.state.model?.id;
+    const currentModelId = agent.state.model?.id;
     if (currentModelId && currentModelId !== lastModelId) {
       lastModelId = currentModelId;
-      saveModelPreference(settings, event.state.model);
+      saveModelPreference(settings, agent.state.model!);
     }
 
     if (!currentTitle && hasConversation(messages)) {
