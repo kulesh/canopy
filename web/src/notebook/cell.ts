@@ -13,6 +13,20 @@ import { html, type TemplateResult } from "lit";
 import type { NotebookCell, CellKind, ChangeProposal } from "./types.js";
 import type { NotebookStore } from "./store.js";
 
+/**
+ * Tracks cells that were recently edited, for flash animation.
+ * Managed here (view layer) rather than in the store (data layer)
+ * because animation timing is a rendering concern.
+ */
+const recentlyEdited = new Set<string>();
+
+export function markRecentlyEdited(cellId: string): void {
+  recentlyEdited.add(cellId);
+  setTimeout(() => {
+    recentlyEdited.delete(cellId);
+  }, 1200);
+}
+
 const KIND_COLORS: Record<CellKind, string> = {
   system: "bg-purple-500/20 text-purple-300 border-purple-500/30",
   container: "bg-blue-500/20 text-blue-300 border-blue-500/30",
@@ -71,7 +85,8 @@ function renderSummary(
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
               e.stopPropagation();
-              store.commitEdit();
+              const edit = store.commitEdit();
+              if (edit) markRecentlyEdited(edit.cellId);
               onRender();
             } else if (e.key === "Escape") {
               e.preventDefault();
@@ -91,7 +106,7 @@ function renderSummary(
     `;
   }
 
-  const justEdited = store.wasJustEdited(cell.id);
+  const justEdited = recentlyEdited.has(cell.id);
   const flashClass = justEdited ? "animate-[flash_1s_ease-out]" : "";
 
   return html`

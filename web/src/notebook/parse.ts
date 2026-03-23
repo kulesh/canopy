@@ -16,62 +16,18 @@
 
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
-  type CellKind,
   type NotebookWire,
   type Notebook,
   type ChangeSet,
-  type ChangeProposal,
-  type FileChange,
   notebookFromWire,
+  isValidNotebookWire,
+  isValidChangeSet,
+  normalizeCell,
 } from "./types.js";
 
 const FENCE_RE = /```canopy-notebook\s*\n([\s\S]*?)```/;
 const ANY_FENCE_RE = /```(?:\w*)\s*\n([\s\S]*?)```/g;
 const CHANGES_FENCE_RE = /```canopy-changes\s*\n([\s\S]*?)```/;
-
-const VALID_KINDS: Set<string> = new Set([
-  "system",
-  "container",
-  "component",
-  "code_unit",
-]);
-
-function isValidCell(obj: any): boolean {
-  return (
-    typeof obj === "object" &&
-    obj !== null &&
-    typeof obj.id === "string" &&
-    typeof obj.name === "string" &&
-    typeof obj.summary === "string" &&
-    VALID_KINDS.has(obj.kind) &&
-    Array.isArray(obj.children) &&
-    Array.isArray(obj.dependencies) &&
-    Array.isArray(obj.file_paths)
-  );
-}
-
-function isValidNotebookWire(obj: any): obj is NotebookWire {
-  return (
-    typeof obj === "object" &&
-    obj !== null &&
-    Array.isArray(obj.cells) &&
-    Array.isArray(obj.root_ids) &&
-    obj.cells.every(isValidCell)
-  );
-}
-
-function normalizeCell(raw: any): NotebookWire["cells"][number] {
-  return {
-    id: raw.id,
-    kind: raw.kind as CellKind,
-    name: raw.name,
-    summary: raw.summary,
-    children: raw.children,
-    dependencies: raw.dependencies,
-    file_paths: raw.file_paths,
-    provenance: raw.provenance ?? { source: "ai" },
-  };
-}
 
 /** Extract text from an agent message's content. */
 function extractText(message: AgentMessage): string | null {
@@ -151,35 +107,6 @@ export function findLatestNotebook(
 }
 
 // --- Change proposal parsing (Phase 3c) ---
-
-function isValidFileChange(obj: any): obj is FileChange {
-  return (
-    typeof obj === "object" &&
-    obj !== null &&
-    typeof obj.file_path === "string" &&
-    typeof obj.description === "string"
-  );
-}
-
-function isValidChangeProposal(obj: any): obj is ChangeProposal {
-  return (
-    typeof obj === "object" &&
-    obj !== null &&
-    typeof obj.cell_id === "string" &&
-    typeof obj.summary === "string" &&
-    Array.isArray(obj.changes) &&
-    obj.changes.every(isValidFileChange)
-  );
-}
-
-function isValidChangeSet(obj: any): obj is ChangeSet {
-  return (
-    typeof obj === "object" &&
-    obj !== null &&
-    Array.isArray(obj.proposals) &&
-    obj.proposals.every(isValidChangeProposal)
-  );
-}
 
 /**
  * Extract a ChangeSet from an assistant message's text content.

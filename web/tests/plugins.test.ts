@@ -173,30 +173,11 @@ describe("Architecture plugin: skills", () => {
   const registry = createRegistry();
   const ctx: PluginContext = {};
 
-  it("scan-architecture skill moved to scanner agent", () => {
-    // scan-architecture is no longer a chat plugin skill — it's handled
-    // by the dedicated scanner agent (see scanner.ts)
-    const skill = registry.skill("scan-architecture", ctx);
-    expect(skill).toBeUndefined();
-  });
-
-  it("provides propose-changes skill", () => {
+  it("propose-changes skill moved to proposer agent", () => {
+    // propose-changes is no longer a chat plugin skill — it's handled
+    // by the dedicated proposer agent (see proposer.ts)
     const skill = registry.skill("propose-changes", ctx);
-    expect(skill).toBeDefined();
-
-    const prompt = skill!.prompt({
-      kind: "component",
-      name: "Auth Service",
-      oldSummary: "Old description",
-      newSummary: "New description",
-      filePaths: ["src/auth.ts", "src/tokens.ts"],
-    });
-
-    expect(prompt).toContain('component "Auth Service"');
-    expect(prompt).toContain("Old description");
-    expect(prompt).toContain("New description");
-    expect(prompt).toContain("src/auth.ts");
-    expect(prompt).toContain("canopy-changes");
+    expect(skill).toBeUndefined();
   });
 
   it("provides rescan-components skill", () => {
@@ -238,10 +219,11 @@ describe("Architecture plugin: system prompt", () => {
     expect(prompt).not.toContain("canopy-notebook");
   });
 
-  it("includes change proposal format instructions", () => {
+  it("no longer includes change proposal format (moved to proposer agent)", () => {
     const prompt = registry.systemPrompt({});
-    expect(prompt).toContain("canopy-changes");
-    expect(prompt).toContain("cell_id");
+    // canopy-changes format instructions are now in the proposer agent's
+    // system prompt, not the chat agent's plugin system prompt
+    expect(prompt).not.toContain("canopy-changes");
   });
 });
 
@@ -546,16 +528,9 @@ describe("Dogfood: full pipeline", () => {
     expect(text).toContain("1 cells");
     expect(store.empty).toBe(false);
 
-    // 4. Propose-changes skill still works for chat agent
-    const proposeSkill = registry.skill("propose-changes", ctx)!;
-    const proposePrompt = proposeSkill.prompt({
-      kind: "component",
-      name: "Plugin Registry",
-      oldSummary: "Resolves tools from plugins",
-      newSummary: "Auto-discovers plugins, composes system prompts, resolves tools and skills",
-      filePaths: ["src/agent/plugins.ts"],
-    });
-    expect(proposePrompt).toContain("Plugin Registry");
-    expect(proposePrompt).toContain("src/agent/plugins.ts");
+    // 4. Rescan skill still works for chat agent
+    const rescanSkill = registry.skill("rescan-components", ctx)!;
+    const rescanPrompt = rescanSkill.prompt({ names: ["Plugin Registry"] });
+    expect(rescanPrompt).toContain("Plugin Registry");
   });
 });

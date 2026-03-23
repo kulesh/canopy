@@ -11,7 +11,12 @@
 
 import { Type } from "@sinclair/typebox";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
-import { type NotebookWire, notebookFromWire } from "../../notebook/types.js";
+import {
+  type NotebookWire,
+  notebookFromWire,
+  isValidNotebookWire,
+  normalizeCell,
+} from "../../notebook/types.js";
 import type { NotebookStore } from "../../notebook/store.js";
 
 // --- Schema ---
@@ -39,35 +44,6 @@ const PresentNotebookSchema = Type.Object({
     description: "IDs of top-level cells (typically one system cell)",
   }),
 });
-
-// --- Validation ---
-
-const VALID_KINDS = new Set(["system", "container", "component", "code_unit"]);
-
-function isValidCell(obj: any): boolean {
-  return (
-    typeof obj === "object" &&
-    obj !== null &&
-    typeof obj.id === "string" &&
-    typeof obj.name === "string" &&
-    typeof obj.summary === "string" &&
-    VALID_KINDS.has(obj.kind) &&
-    Array.isArray(obj.children) &&
-    Array.isArray(obj.dependencies) &&
-    Array.isArray(obj.file_paths)
-  );
-}
-
-function isValidNotebookWire(obj: any): obj is NotebookWire {
-  return (
-    typeof obj === "object" &&
-    obj !== null &&
-    Array.isArray(obj.cells) &&
-    Array.isArray(obj.root_ids) &&
-    obj.cells.length > 0 &&
-    obj.cells.every(isValidCell)
-  );
-}
 
 // --- Tool factory ---
 
@@ -97,16 +73,7 @@ export function presentNotebookTool(store: NotebookStore): AgentTool<any> {
       }
 
       const wire: NotebookWire = {
-        cells: params.cells.map((c) => ({
-          id: c.id,
-          kind: c.kind,
-          name: c.name,
-          summary: c.summary,
-          children: c.children,
-          dependencies: c.dependencies,
-          file_paths: c.file_paths,
-          provenance: c.provenance ?? { source: "ai" as const },
-        })),
+        cells: params.cells.map(normalizeCell),
         root_ids: params.root_ids,
       };
 

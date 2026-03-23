@@ -73,3 +73,80 @@ export function notebookFromWire(wire: NotebookWire): Notebook {
   }
   return { cells, root_ids: wire.root_ids };
 }
+
+// --- Validation ---
+
+const VALID_KINDS: ReadonlySet<string> = new Set<CellKind>([
+  "system",
+  "container",
+  "component",
+  "code_unit",
+]);
+
+export function isValidCell(obj: unknown): boolean {
+  return (
+    typeof obj === "object" &&
+    obj !== null &&
+    typeof (obj as any).id === "string" &&
+    typeof (obj as any).name === "string" &&
+    typeof (obj as any).summary === "string" &&
+    VALID_KINDS.has((obj as any).kind) &&
+    Array.isArray((obj as any).children) &&
+    Array.isArray((obj as any).dependencies) &&
+    Array.isArray((obj as any).file_paths)
+  );
+}
+
+export function isValidNotebookWire(obj: unknown): obj is NotebookWire {
+  return (
+    typeof obj === "object" &&
+    obj !== null &&
+    Array.isArray((obj as any).cells) &&
+    Array.isArray((obj as any).root_ids) &&
+    (obj as any).cells.length > 0 &&
+    (obj as any).cells.every(isValidCell)
+  );
+}
+
+export function isValidFileChange(obj: unknown): obj is FileChange {
+  return (
+    typeof obj === "object" &&
+    obj !== null &&
+    typeof (obj as any).file_path === "string" &&
+    typeof (obj as any).description === "string"
+  );
+}
+
+export function isValidChangeProposal(obj: unknown): obj is ChangeProposal {
+  return (
+    typeof obj === "object" &&
+    obj !== null &&
+    typeof (obj as any).cell_id === "string" &&
+    typeof (obj as any).summary === "string" &&
+    Array.isArray((obj as any).changes) &&
+    (obj as any).changes.every(isValidFileChange)
+  );
+}
+
+export function isValidChangeSet(obj: unknown): obj is ChangeSet {
+  return (
+    typeof obj === "object" &&
+    obj !== null &&
+    Array.isArray((obj as any).proposals) &&
+    (obj as any).proposals.every(isValidChangeProposal)
+  );
+}
+
+/** Normalize a raw cell from wire/fence input, filling in default provenance. */
+export function normalizeCell(raw: any): NotebookCellWire {
+  return {
+    id: raw.id,
+    kind: raw.kind as CellKind,
+    name: raw.name,
+    summary: raw.summary,
+    children: raw.children,
+    dependencies: raw.dependencies,
+    file_paths: raw.file_paths,
+    provenance: raw.provenance ?? { source: "ai" },
+  };
+}

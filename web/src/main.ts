@@ -1,394 +1,56 @@
+/**
+ * Canopy PWA — Entry Point
+ *
+ * Wires together storage, plugin registry, orchestrator, and layout.
+ * No business logic lives here — just initialization and event wiring.
+ */
+
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
-import {
-  AppStorage,
-  ChatPanel,
-  CustomProvidersStore,
-  IndexedDBStorageBackend,
-  ProviderKeysStore,
-  SessionsStore,
-  SettingsDialog,
-  SettingsStore,
-  SessionListDialog,
-  ProvidersModelsTab,
-  ProxyTab,
-  setAppStorage,
-} from "@mariozechner/pi-web-ui";
-import type { Agent, AgentMessage } from "@mariozechner/pi-agent-core";
-import { html, render } from "lit";
-import { icon } from "@mariozechner/mini-lit";
-import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { History, Plus, Settings, PanelLeft, PanelLeftClose, PanelRight, PanelRightClose, FolderOpen, LoaderCircle } from "lucide";
-import { createCanopyAgent, saveModelPreference, resolveDefaultModel } from "./agent/session.js";
-import { createRegistry, type PluginContext } from "./agent/plugins.js";
-import { createScannerAgent, type ScannerHandle } from "./agent/scanner.js";
-import { selectProjectDirectory, isFileSystemAccessSupported } from "./agent/project.js";
-import { NotebookStore, type CellEdit } from "./notebook/store.js";
-import { findLatestNotebook, findLatestChanges } from "./notebook/parse.js";
-import { renderNotebookPanel } from "./notebook/panel.js";
+import { ChatPanel } from "@mariozechner/pi-web-ui";
+import type { Agent } from "@mariozechner/pi-agent-core";
+import { createRegistry } from "./agent/plugins.js";
+import { NotebookStore } from "./notebook/store.js";
+import { Orchestrator } from "./orchestrator.js";
+import { createStorageLayer, ensureProxySettings } from "./storage.js";
+import { renderLayout, renderLoading } from "./layout.js";
 import "./app.css";
 
-// --- Storage setup ---
+// --- Storage ---
 
-const settings = new SettingsStore();
-const providerKeys = new ProviderKeysStore();
-const sessions = new SessionsStore();
-const customProviders = new CustomProvidersStore();
+const { settings, providerKeys, storage } = createStorageLayer();
 
-const backend = new IndexedDBStorageBackend({
-  dbName: "canopy",
-  version: 1,
-  stores: [
-    settings.getConfig(),
-    SessionsStore.getMetadataConfig(),
-    providerKeys.getConfig(),
-    customProviders.getConfig(),
-    sessions.getConfig(),
-  ],
-});
-
-settings.setBackend(backend);
-providerKeys.setBackend(backend);
-customProviders.setBackend(backend);
-sessions.setBackend(backend);
-
-const storage = new AppStorage(settings, providerKeys, sessions, customProviders, backend);
-setAppStorage(storage);
-
-// Fix #2: Enable CORS proxy for dev server.
-// Pi SDK routes API calls through `<proxyUrl>/?url=<target>`.
-// Vite's corsProxy plugin handles this server-side.
-async function ensureProxySettings(): Promise<void> {
-  try {
-    const proxyEnabled = await settings.get("proxy.enabled");
-    if (!proxyEnabled) {
-      await settings.set("proxy.enabled", true);
-      await settings.set("proxy.url", `${window.location.origin}/cors-proxy`);
-    }
-  } catch {
-    // Storage not ready yet — retry once
-    setTimeout(ensureProxySettings, 500);
-  }
-}
-
-// --- Plugin registry (auto-discovers plugins from ./agent/plugins/) ---
+// --- Plugin registry ---
 
 const registry = createRegistry();
 
-// --- App state ---
-
-let agent: Agent;
-let chatPanel: ChatPanel;
-let currentSessionId: string | undefined;
-let currentTitle = "";
-let agentUnsubscribe: (() => void) | undefined;
-let notebookVisible = false;
-let chatVisible = true;
-let scanning = false;
-let splitPercent = 50;
-let mobilePanel: "chat" | "notebook" = "chat";
-let projectName: string | undefined;
-let toolContext: PluginContext = {};
-let scannerHandle: ScannerHandle | undefined;
+// --- Notebook store ---
 
 const notebookStore = new NotebookStore();
 
-const SPLIT_MIN = 20;
-const SPLIT_MAX = 80;
+// --- Orchestrator ---
 
-function isMobile(): boolean {
-  return window.innerWidth < 768;
-}
+let orchestrator: Orchestrator;
 
-// --- Split-pane drag ---
-
-function onSplitterPointerDown(e: PointerEvent): void {
-  e.preventDefault();
-  const container = (e.target as HTMLElement).parentElement!;
-  const rect = container.getBoundingClientRect();
-  const target = e.target as HTMLElement;
-  target.setPointerCapture(e.pointerId);
-
-  const onMove = (ev: PointerEvent) => {
-    const pct = ((ev.clientX - rect.left) / rect.width) * 100;
-    splitPercent = Math.max(SPLIT_MIN, Math.min(SPLIT_MAX, pct));
-    renderApp();
-  };
-  const onUp = () => {
-    target.removeEventListener("pointermove", onMove);
-    target.removeEventListener("pointerup", onUp);
-  };
-  target.addEventListener("pointermove", onMove);
-  target.addEventListener("pointerup", onUp);
-}
-
-// --- Session helpers ---
-
-function titleFromMessages(messages: AgentMessage[]): string {
-  const first = messages.find(
-    (m) => m.role === "user" || m.role === "user-with-attachments",
-  );
-  if (!first || (first.role !== "user" && first.role !== "user-with-attachments"))
-    return "";
-
-  const content = first.content;
-  const text =
-    typeof content === "string"
-      ? content
-      : (content as any[])
-          .filter((c: any) => c.type === "text")
-          .map((c: any) => c.text || "")
-          .join(" ");
-
-  const trimmed = text.trim();
-  if (!trimmed) return "";
-  return trimmed.length <= 60 ? trimmed : `${trimmed.substring(0, 57)}...`;
-}
-
-function hasConversation(messages: AgentMessage[]): boolean {
-  return (
-    messages.some((m: any) => m.role === "user" || m.role === "user-with-attachments") &&
-    messages.some((m: any) => m.role === "assistant")
-  );
-}
-
-async function saveSession() {
-  if (!storage.sessions || !currentSessionId || !agent || !currentTitle) {
-    if (agent && hasConversation(agent.state.messages)) {
-      console.warn("[canopy] saveSession skipped — missing:",
-        !storage.sessions && "storage.sessions",
-        !currentSessionId && "sessionId",
-        !agent && "agent",
-        !currentTitle && "title",
-      );
-    }
-    return;
-  }
-  const state = agent.state;
-  if (!hasConversation(state.messages)) return;
-
-  try {
-    await storage.sessions.save(
-      {
-        id: currentSessionId,
-        title: currentTitle,
-        model: state.model!,
-        thinkingLevel: state.thinkingLevel,
-        messages: state.messages,
-        createdAt: new Date().toISOString(),
-        lastModified: new Date().toISOString(),
-      },
-      {
-        id: currentSessionId,
-        title: currentTitle,
-        createdAt: new Date().toISOString(),
-        lastModified: new Date().toISOString(),
-        messageCount: state.messages.length,
-        usage: {
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 0,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-        },
-        thinkingLevel: state.thinkingLevel,
-        preview: titleFromMessages(state.messages),
-      },
-    );
-  } catch (e) {
-    console.error("[canopy] Failed to save session:", e);
-  }
-}
-
-// --- Notebook extraction from agent messages ---
-// Used only for session restoration (legacy messages may contain notebook fences)
-// and for change proposal parsing (still uses fences until Phase 2).
-
-function syncNotebookFromMessages(messages: AgentMessage[]): void {
-  // Notebook data: try fence-based parsing as fallback for legacy sessions
-  if (notebookStore.empty) {
-    const notebook = findLatestNotebook(messages);
-    if (notebook && notebook.cells.size > 0) {
-      notebookStore.load(notebook);
-      if (!notebookVisible) {
-        notebookVisible = true;
-      }
-    }
-  }
-
-  // Change proposals still use fences (until Phase 2 extracts a proposer agent)
-  const changeSet = findLatestChanges(messages);
-  if (changeSet && changeSet.proposals.length > 0) {
-    notebookStore.loadChanges(changeSet);
-  }
-}
-
-// --- Cell edit → agent proposal (Phase 3b) ---
-
-function requestCellChangeProposal(edit: CellEdit): void {
-  const cell = notebookStore.cell(edit.cellId);
-  if (!cell || !agent) return;
-
-  const skill = registry.skill("propose-changes", toolContext);
-  if (!skill) return;
-
-  agent.prompt(
-    skill.prompt({
-      kind: cell.kind,
-      name: cell.name,
-      oldSummary: edit.oldSummary,
-      newSummary: edit.newSummary,
-      filePaths: cell.file_paths,
-    }),
-  );
-}
-
-// --- Re-scan after changes (Phase 3d) ---
-
-function requestRescan(cellIds: string[]): void {
-  if (!agent || cellIds.length === 0) return;
-
-  const names = cellIds
-    .map((id) => notebookStore.cell(id)?.name)
-    .filter(Boolean) as string[];
-
-  if (names.length === 0) return;
-
-  const skill = registry.skill("rescan-components", toolContext);
-  if (!skill) return;
-
-  agent.prompt(skill.prompt({ names }));
-}
-
-// --- Project directory ---
-
-async function openProject(): Promise<void> {
-  try {
-    const handle = await selectProjectDirectory();
-    projectName = handle.name;
-    toolContext = { projectHandle: handle };
-
-    // Reinitialize chat agent with file system tools now available
-    await initAgent();
-
-    // Launch scanner agent — separate instance, headless
-    await startScan(handle);
-
-    renderApp();
-  } catch (e) {
-    // User cancelled the picker — do nothing
-    if ((e as Error).name === "AbortError") return;
-    console.error("Failed to open project:", e);
-  }
-}
-
-async function startScan(handle: FileSystemDirectoryHandle): Promise<void> {
-  // Abort any in-progress scan
-  if (scannerHandle) {
-    scannerHandle.abort();
-  }
-
-  const model = await resolveDefaultModel(settings);
-  scannerHandle = createScannerAgent({
-    projectHandle: handle,
+function renderApp() {
+  renderLayout({
+    chatPanel: orchestrator.state.chatPanel,
     notebookStore,
-    model,
+    notebookVisible: orchestrator.state.notebookVisible,
+    scanning: orchestrator.state.scanning,
+    projectName: orchestrator.state.projectName,
+    currentTitle: orchestrator.state.currentTitle,
+    agentMessages: () => orchestrator.state.agent?.state?.messages ?? [],
+    onOpenProject: () => orchestrator.openProject(),
+    onLoadSession: (id) => orchestrator.loadSession(id),
+    onDeleteSession: (deletedId) => {
+      if (deletedId === orchestrator.state.currentSessionId) newSession();
+    },
+    onNewSession: newSession,
+    setNotebookVisible: (v) => {
+      orchestrator.state.notebookVisible = v;
+    },
+    renderApp,
   });
-
-  scanning = true;
-  renderApp();
-
-  // Subscribe to scanner events — when notebook is loaded, show panel.
-  // The present_notebook tool updates NotebookStore directly, so we
-  // check after tool execution completes.
-  const unsubscribe = scannerHandle.subscribe((event) => {
-    if (event.type === "tool_execution_end") {
-      if (!notebookStore.empty && !notebookVisible) {
-        notebookVisible = true;
-        renderApp();
-      }
-    }
-  });
-
-  // Run scan — fire and forget, clean up on completion
-  scannerHandle.scan(handle.name).then(() => {
-    scanning = false;
-    unsubscribe();
-    renderApp();
-  }).catch((e) => {
-    console.error("[canopy] Scanner failed:", e);
-    scanning = false;
-    unsubscribe();
-    renderApp();
-  });
-}
-
-// --- Agent lifecycle ---
-
-async function initAgent(initialMessages?: AgentMessage[]) {
-  if (agentUnsubscribe) agentUnsubscribe();
-
-  const model = await resolveDefaultModel(settings);
-
-  agent = await createCanopyAgent({
-    chatPanel,
-    registry,
-    toolContext,
-    initialMessages,
-    model,
-  });
-
-  // If restoring a session, check for existing notebook data
-  if (initialMessages) {
-    syncNotebookFromMessages(initialMessages);
-  }
-
-  let lastModelId = agent.state.model?.id;
-
-  agentUnsubscribe = agent.subscribe((event: any) => {
-    // Agent emits: agent_start/end, turn_start/end, message_start/update/end,
-    // tool_execution_start/update/end. We act on message_end and turn_end —
-    // these are the points where agent.state.messages is fully updated.
-    if (event.type !== "message_end" && event.type !== "turn_end") return;
-    const messages = agent.state.messages;
-
-    // Persist model preference when user changes it
-    const currentModelId = agent.state.model?.id;
-    if (currentModelId && currentModelId !== lastModelId) {
-      lastModelId = currentModelId;
-      saveModelPreference(settings, agent.state.model!);
-    }
-
-    if (!currentTitle && hasConversation(messages)) {
-      currentTitle = titleFromMessages(messages);
-    }
-    if (!currentSessionId && hasConversation(messages)) {
-      currentSessionId = crypto.randomUUID();
-      const url = new URL(window.location.href);
-      url.searchParams.set("session", currentSessionId);
-      window.history.replaceState({}, "", url);
-    }
-    if (currentSessionId) saveSession();
-
-    // Sync change proposals from chat agent (Phase 2 will extract this)
-    syncNotebookFromMessages(messages);
-
-    renderApp();
-  });
-}
-
-async function loadSession(sessionId: string): Promise<boolean> {
-  if (!storage.sessions) return false;
-  const data = await storage.sessions.get(sessionId);
-  if (!data) return false;
-
-  currentSessionId = sessionId;
-  const metadata = await storage.sessions.getMetadata(sessionId);
-  currentTitle = metadata?.title || "";
-
-  await initAgent(data.messages);
-  renderApp();
-  return true;
 }
 
 function newSession() {
@@ -397,203 +59,47 @@ function newSession() {
   window.location.href = url.toString();
 }
 
-// --- Render ---
-
-function renderApp() {
-  const app = document.getElementById("app");
-  if (!app) return;
-
-  const hasNotebook = !notebookStore.empty || scanning;
-  const mobile = isMobile();
-  const notebookHasContent = !notebookStore.empty;
-  const showNotebook = (notebookVisible || scanning) && notebookHasContent && (!mobile || mobilePanel === "notebook");
-  const showChat = chatVisible && (!mobile || mobilePanel === "chat");
-  const showBothPanels = showNotebook && showChat && !mobile;
-  const fsSupported = isFileSystemAccessSupported();
-  const displayTitle = projectName
-    ? `${currentTitle || "Canopy"} — ${projectName}`
-    : (currentTitle || "Canopy");
-
-  // Scan overlay: shown in chat area when scanning + no conversation yet
-  const chatEmpty = !agent || !hasConversation(agent.state.messages);
-  const showScanOverlay = scanning && chatEmpty && showChat;
-
-  render(
-    html`
-      <div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden">
-        <!-- Header -->
-        <div class="flex items-center justify-between border-b border-border shrink-0">
-          <div class="flex items-center gap-2 px-4 py-1">
-            ${Button({
-              variant: "ghost",
-              size: "sm",
-              children: icon(History, "sm"),
-              onClick: () =>
-                SessionListDialog.open(
-                  async (id) => await loadSession(id),
-                  (deletedId) => {
-                    if (deletedId === currentSessionId) newSession();
-                  },
-                ),
-              title: "Sessions",
-            })}
-            ${Button({
-              variant: "ghost",
-              size: "sm",
-              children: icon(Plus, "sm"),
-              onClick: newSession,
-              title: "New Session",
-            })}
-            ${fsSupported
-              ? Button({
-                  variant: "ghost",
-                  size: "sm",
-                  children: icon(FolderOpen, "sm"),
-                  onClick: openProject,
-                  title: "Open Project",
-                })
-              : ""}
-            <span class="text-sm font-medium text-foreground truncate max-w-xs">
-              ${displayTitle}
-            </span>
-            ${scanning
-              ? html`<span class="scan-chip">${icon(LoaderCircle, "xs")} Scanning</span>`
-              : ""}
-          </div>
-          <div class="flex items-center gap-1 px-2">
-            ${hasNotebook && !mobile
-              ? Button({
-                  variant: "ghost",
-                  size: "sm",
-                  children: icon(notebookVisible || scanning ? PanelLeftClose : PanelLeft, "sm"),
-                  onClick: () => {
-                    notebookVisible = !notebookVisible && !scanning;
-                    if (notebookVisible && !chatVisible) chatVisible = true;
-                    renderApp();
-                  },
-                  title: notebookVisible || scanning ? "Hide Notebook" : "Show Notebook",
-                })
-              : ""}
-            ${hasNotebook && mobile
-              ? Button({
-                  variant: "ghost",
-                  size: "sm",
-                  children: icon(mobilePanel === "notebook" ? PanelLeftClose : PanelLeft, "sm"),
-                  onClick: () => {
-                    mobilePanel = mobilePanel === "chat" ? "notebook" : "chat";
-                    renderApp();
-                  },
-                  title: mobilePanel === "chat" ? "Show Notebook" : "Show Chat",
-                })
-              : ""}
-            ${showNotebook && !mobile
-              ? Button({
-                  variant: "ghost",
-                  size: "sm",
-                  children: icon(chatVisible ? PanelRightClose : PanelRight, "sm"),
-                  onClick: () => {
-                    chatVisible = !chatVisible;
-                    if (!chatVisible && !notebookVisible && !scanning) notebookVisible = true;
-                    renderApp();
-                  },
-                  title: chatVisible ? "Hide Chat" : "Show Chat",
-                })
-              : ""}
-            <theme-toggle></theme-toggle>
-            ${Button({
-              variant: "ghost",
-              size: "sm",
-              children: icon(Settings, "sm"),
-              onClick: () =>
-                SettingsDialog.open([new ProvidersModelsTab(), new ProxyTab()]),
-              title: "Settings",
-            })}
-          </div>
-        </div>
-
-        <!-- Main content: notebook + chat side by side (desktop) or one at a time (mobile) -->
-        <div class="flex-1 flex overflow-hidden">
-          <!-- Notebook panel -->
-          ${showNotebook
-            ? html`
-                <div class="flex flex-col shrink-0"
-                     style="${showBothPanels ? `width: ${splitPercent}%` : 'width: 100%'}">
-                  <div class="px-3 py-1.5 border-b border-border/50 shrink-0 flex items-center gap-2">
-                    <span class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                      Architecture
-                    </span>
-                    ${scanning
-                      ? html`<span class="text-xs text-muted-foreground animate-pulse">Scanning...</span>`
-                      : ""}
-                  </div>
-                  ${renderNotebookPanel(notebookStore, renderApp)}
-                </div>
-              `
-            : ""}
-
-          <!-- Drag handle -->
-          ${showBothPanels
-            ? html`<div class="splitter" @pointerdown=${onSplitterPointerDown}></div>`
-            : ""}
-
-          <!-- Chat panel -->
-          ${showChat
-            ? html`
-                <div class="flex-1 min-w-0 relative">
-                  ${chatPanel}
-                  ${showScanOverlay
-                    ? html`
-                        <div class="scan-overlay">
-                          <div class="scan-overlay-content">
-                            <span class="scan-overlay-icon">${icon(LoaderCircle, "md")}</span>
-                            <span class="text-sm font-medium">Analyzing codebase architecture</span>
-                            <span class="text-xs text-muted-foreground">The notebook panel will appear when analysis is ready</span>
-                          </div>
-                        </div>
-                      `
-                    : ""}
-                </div>
-              `
-            : ""}
-        </div>
-      </div>
-    `,
-    app,
-  );
-}
-
 // --- Init ---
 
 async function init() {
-  const app = document.getElementById("app");
-  if (!app) throw new Error("App container not found");
+  renderLoading();
 
-  render(
-    html`
-      <div class="w-full h-screen flex items-center justify-center bg-background text-foreground">
-        <div class="text-muted-foreground">Loading...</div>
-      </div>
-    `,
-    app,
+  const chatPanel = new ChatPanel();
+
+  ensureProxySettings(settings);
+
+  orchestrator = new Orchestrator(
+    {
+      agent: undefined as unknown as Agent,
+      chatPanel,
+      currentSessionId: undefined,
+      currentTitle: "",
+      scanning: false,
+      projectName: undefined,
+      toolContext: {},
+      notebookVisible: false,
+    },
+    {
+      registry,
+      notebookStore,
+      settings,
+      storage,
+      renderApp,
+    },
   );
-
-  chatPanel = new ChatPanel();
-
-  // Enable CORS proxy for dev
-  ensureProxySettings();
 
   // Subscribe to notebook store for re-renders, edits, and change lifecycle
   const dismissedCells: string[] = [];
 
   notebookStore.subscribe((event) => {
     if (event.type === "cell-edited") {
-      requestCellChangeProposal(event.edit);
+      orchestrator.requestCellChangeProposal(event.edit);
     }
     if (event.type === "changes-dismissed") {
       dismissedCells.push(event.cellId);
       // When all changes have been reviewed, trigger re-scan
       if (!notebookStore.hasChanges && dismissedCells.length > 0) {
-        requestRescan([...dismissedCells]);
+        orchestrator.requestRescan([...dismissedCells]);
         dismissedCells.length = 0;
       }
     }
@@ -605,13 +111,13 @@ async function init() {
 
   const sessionId = new URLSearchParams(window.location.search).get("session");
   if (sessionId) {
-    const loaded = await loadSession(sessionId);
+    const loaded = await orchestrator.loadSession(sessionId);
     if (!loaded) {
       newSession();
       return;
     }
   } else {
-    await initAgent();
+    await orchestrator.initAgent();
   }
 
   renderApp();
@@ -624,16 +130,17 @@ if (import.meta.env.DEV) {
   (window as any).__canopy__ = {
     store: notebookStore,
     registry,
-    toolContext,
+    get orchestrator() { return orchestrator; },
+    get toolContext() { return orchestrator.state.toolContext; },
     renderApp,
-    get agent() { return agent; },
-    get scanner() { return scannerHandle; },
-    get isScanning() { return scanning; },
-    showNotebook() { notebookVisible = true; renderApp(); },
-    hideNotebook() { notebookVisible = false; renderApp(); },
+    get agent() { return orchestrator.state.agent; },
+    get scanner() { return orchestrator.scanner; },
+    get isScanning() { return orchestrator.state.scanning; },
+    showNotebook() { orchestrator.state.notebookVisible = true; renderApp(); },
+    hideNotebook() { orchestrator.state.notebookVisible = false; renderApp(); },
     setProject(handle: FileSystemDirectoryHandle) {
-      projectName = handle.name;
-      toolContext = { projectHandle: handle };
+      orchestrator.state.projectName = handle.name;
+      orchestrator.state.toolContext = { projectHandle: handle };
       renderApp();
     },
     async setApiKey(provider: string, key: string) {

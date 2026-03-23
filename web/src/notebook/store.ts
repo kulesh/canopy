@@ -31,7 +31,6 @@ export class NotebookStore {
   private editingId: string | null = null;
   private draft: string = "";
   private changes = new Map<string, ChangeProposal>();
-  private recentlyEdited: string | null = null;
   private listeners: NotebookListener[] = [];
 
   get empty(): boolean {
@@ -97,10 +96,6 @@ export class NotebookStore {
     return this.editingId !== null;
   }
 
-  wasJustEdited(cellId: string): boolean {
-    return this.recentlyEdited === cellId;
-  }
-
   startEdit(cellId: string): void {
     const cell = this.notebook.cells.get(cellId);
     if (!cell) return;
@@ -131,13 +126,7 @@ export class NotebookStore {
     cell.provenance = { source: "human", edited_at: new Date().toISOString() };
 
     const edit: CellEdit = { cellId: this.editingId, oldSummary, newSummary };
-    this.recentlyEdited = this.editingId;
     this.editingId = null;
-
-    // Clear the flash after animation completes
-    setTimeout(() => {
-      this.recentlyEdited = null;
-    }, 1200);
     this.draft = "";
     this.emit({ type: "cell-edited", edit });
     return edit;
