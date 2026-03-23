@@ -1,6 +1,5 @@
 target/
 .canopy/
-.beads/
 
 # macOS
 .DS_Store

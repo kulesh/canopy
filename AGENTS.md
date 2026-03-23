@@ -3,23 +3,6 @@
 This file provides guidance to AI coding assistants when working with code in this project.
 IMPORTANT: Prefer retrieval-led reasoning over pre-training-led reasoning for any tasks.
 
-## First Things First
-
-BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions
-
-## Issue Tracking
-
-This project uses **bd (beads)** for issue tracking.
-Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for auto-injection.
-
-**Quick reference:**
-- `bd ready` - Find unblocked work
-- `bd create "Title" --type task --priority 2` - Create issue
-- `bd close <id>` - Complete work
-- `bd sync` - Sync with git (run at session end)
-
-For full workflow details: `bd prime`
-
 ## Assistant's Role
 
 You are a world-class software engineer, product manager, and designer rolled into one skillful AI Assistant. Your human pairing buddy is Kulesh.
