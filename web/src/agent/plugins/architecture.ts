@@ -1,79 +1,34 @@
 /**
- * Architecture Plugin
+ * Architecture Plugin (Chat Agent)
  *
- * Gives the agent the ability to analyze codebases and present
- * findings as structured C4-style notebooks. Provides:
+ * Provides the chat agent with awareness of the architecture notebook
+ * and the ability to propose code changes. The scanning responsibility
+ * has moved to the dedicated scanner agent (see scanner.ts).
  *
- * - System prompt: scanning strategy, notebook format, change proposal format
- * - Skills: scan-architecture, propose-changes, rescan-components
- *
- * No tools — the agent uses filesystem tools to explore; this plugin
- * tells it what to look for and how to present what it finds.
+ * Remaining contributions:
+ * - System prompt: codebase context + change proposal format
+ * - Skills: propose-changes, rescan-components
  */
 
 import type { Plugin, PluginContext, Skill } from "../plugins.js";
 
-// --- System prompt fragments ---
+// --- System prompt ---
 
-function scanningStrategy(ctx: PluginContext): string {
+function chatContext(ctx: PluginContext): string {
   if (!ctx.projectHandle) {
     return `No project directory is currently open. Ask the user to open a project using the folder button in the header bar.`;
   }
 
-  return `You have tools for exploring the codebase:
+  return `A project is open and its architecture has been (or is being) scanned into a notebook panel. You can answer questions about the codebase using your general knowledge and the context from our conversation.
 
-- **list_directory(path?)**: List files and subdirectories. Start with the root (no path) to see the project structure, then drill into interesting directories.
-- **read_file(path)**: Read a file's contents with line numbers. Use this to understand implementation details.
-
-## Scanning Strategy
-
-When asked to analyze architecture:
-1. Start with \`list_directory()\` to see the top-level structure
-2. Read orientation files first: README, package.json, Cargo.toml, go.mod, etc.
-3. List source directories to understand the module layout
-4. Read key source files — entry points, module roots, type definitions
-5. Don't read every file. Sample representative files from each subsystem.
-6. Focus on boundaries: what talks to what, what depends on what
-7. Emit a canopy-notebook fence when you have enough signal`;
+You have tools for exploring the codebase:
+- **list_directory(path?)**: List files and subdirectories
+- **read_file(path)**: Read a file's contents with line numbers`;
 }
-
-const NOTEBOOK_FORMAT = `## Structured Output
-
-CRITICAL: When producing architecture analysis, you MUST emit the notebook JSON directly in your response text using a canopy-notebook code fence. Do NOT create artifacts for this — the notebook fence is parsed by the UI to render an interactive panel. If you use an artifact, the notebook panel will not appear.
-
-When the user asks you to "show the architecture," "analyze this project," or similar requests for architectural overview, you MUST return a structured notebook alongside your explanation. Wrap the notebook in a canopy-notebook code fence:
-
-\`\`\`canopy-notebook
-{
-  "cells": [
-    {
-      "id": "unique-id",
-      "kind": "system" | "container" | "component" | "code_unit",
-      "name": "Human-Readable Name",
-      "summary": "One to three sentences describing what this does, why it exists, and how it fits into the larger system.",
-      "children": ["child-id-1", "child-id-2"],
-      "dependencies": ["sibling-id-that-this-depends-on"],
-      "file_paths": ["src/relevant/path.ts"],
-      "provenance": { "source": "ai" }
-    }
-  ],
-  "root_ids": ["top-level-system-id"]
-}
-\`\`\`
-
-Rules for structured output:
-1. Every cell referenced in \`children\` or \`dependencies\` must exist in the \`cells\` array
-2. Use kebab-case IDs derived from the component name (e.g., "auth-service", "jwt-validator")
-3. Summaries should be human-readable — describe intent and responsibility, not implementation
-4. Include file_paths only for concrete components (not for system-level or abstract containers)
-5. Start with a system cell, decompose into containers, then components
-6. Only go to code_unit depth when the user asks to drill down
-
-Always include conversational text before or after the notebook fence to explain your findings. The notebook is the structured view; the text is the narrative.`;
 
 const CHANGE_PROPOSAL_FORMAT = `## Change Proposals
 
-When the user edits a cell's description and you propose code changes, you MUST include a structured change proposal alongside your explanation. Wrap it in a canopy-changes code fence:
+When the user edits a cell's description and you propose code changes, include a structured change proposal alongside your explanation. Wrap it in a canopy-changes code fence:
 
 \`\`\`canopy-changes
 {
@@ -97,7 +52,7 @@ When the user edits a cell's description and you propose code changes, you MUST 
 Rules for change proposals:
 1. The \`cell_id\` must match an existing cell in the notebook
 2. Include concrete file paths and descriptions for each change
-3. Use \`before\`/\`after\` snippets to show the key diff — keep them short (relevant lines only, not entire files)
+3. Use \`before\`/\`after\` snippets to show the key diff — keep them short
 4. If the change affects multiple cells, include multiple proposals
 5. Always explain your reasoning in conversational text alongside the structured fence`;
 
@@ -105,18 +60,6 @@ Rules for change proposals:
 
 function createSkills(): Skill[] {
   return [
-    {
-      id: "scan-architecture",
-      label: "Scan Architecture",
-      prompt(params) {
-        const projectName = params.projectName as string;
-        return (
-          `Analyze the architecture of this project ("${projectName}"). ` +
-          `Start by exploring the directory structure and reading key files, ` +
-          `then present your findings as a canopy-notebook.`
-        );
-      },
-    },
     {
       id: "propose-changes",
       label: "Propose Changes",
@@ -168,15 +111,11 @@ const architecturePlugin: Plugin = {
   label: "Architecture Analysis",
 
   available(_ctx: PluginContext): boolean {
-    // Always active — skills are useful even without a project.
-    // The system prompt adapts based on whether a project is open.
     return true;
   },
 
   systemPrompt(ctx: PluginContext): string {
-    return [scanningStrategy(ctx), NOTEBOOK_FORMAT, CHANGE_PROPOSAL_FORMAT].join(
-      "\n\n",
-    );
+    return [chatContext(ctx), CHANGE_PROPOSAL_FORMAT].join("\n\n");
   },
 
   skills(_ctx: PluginContext): Skill[] {

@@ -20,6 +20,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { History, Plus, Settings, PanelLeft, PanelLeftClose, FolderOpen } from "lucide";
 import { createCanopyAgent, saveModelPreference, resolveDefaultModel } from "./agent/session.js";
 import { createRegistry, type PluginContext } from "./agent/plugins.js";
+import { createScannerAgent, type ScannerHandle } from "./agent/scanner.js";
 import { selectProjectDirectory, isFileSystemAccessSupported } from "./agent/project.js";
 import { NotebookStore, type CellEdit } from "./notebook/store.js";
 import { findLatestNotebook, findLatestChanges } from "./notebook/parse.js";
@@ -81,9 +82,11 @@ let currentSessionId: string | undefined;
 let currentTitle = "";
 let agentUnsubscribe: (() => void) | undefined;
 let notebookVisible = false;
+let scanning = false;
 let mobilePanel: "chat" | "notebook" = "chat";
 let projectName: string | undefined;
 let toolContext: PluginContext = {};
+let scannerHandle: ScannerHandle | undefined;
 
 const notebookStore = new NotebookStore();
 
@@ -171,17 +174,22 @@ async function saveSession() {
 }
 
 // --- Notebook extraction from agent messages ---
+// Used only for session restoration (legacy messages may contain notebook fences)
+// and for change proposal parsing (still uses fences until Phase 2).
 
 function syncNotebookFromMessages(messages: AgentMessage[]): void {
-  const notebook = findLatestNotebook(messages);
-  if (notebook && notebook.cells.size > 0) {
-    notebookStore.load(notebook);
-    if (!notebookVisible) {
-      notebookVisible = true;
+  // Notebook data: try fence-based parsing as fallback for legacy sessions
+  if (notebookStore.empty) {
+    const notebook = findLatestNotebook(messages);
+    if (notebook && notebook.cells.size > 0) {
+      notebookStore.load(notebook);
+      if (!notebookVisible) {
+        notebookVisible = true;
+      }
     }
   }
 
-  // Sync change proposals (Phase 3c)
+  // Change proposals still use fences (until Phase 2 extracts a proposer agent)
   const changeSet = findLatestChanges(messages);
   if (changeSet && changeSet.proposals.length > 0) {
     notebookStore.loadChanges(changeSet);
@@ -233,14 +241,11 @@ async function openProject(): Promise<void> {
     projectName = handle.name;
     toolContext = { projectHandle: handle };
 
-    // Reinitialize agent with file system tools now available
+    // Reinitialize chat agent with file system tools now available
     await initAgent();
 
-    // Auto-trigger architecture scan via plugin skill
-    const scanSkill = registry.skill("scan-architecture", toolContext);
-    if (scanSkill) {
-      agent.prompt(scanSkill.prompt({ projectName: handle.name }));
-    }
+    // Launch scanner agent — separate instance, headless
+    await startScan(handle);
 
     renderApp();
   } catch (e) {
@@ -248,6 +253,47 @@ async function openProject(): Promise<void> {
     if ((e as Error).name === "AbortError") return;
     console.error("Failed to open project:", e);
   }
+}
+
+async function startScan(handle: FileSystemDirectoryHandle): Promise<void> {
+  // Abort any in-progress scan
+  if (scannerHandle) {
+    scannerHandle.abort();
+  }
+
+  const model = await resolveDefaultModel(settings);
+  scannerHandle = createScannerAgent({
+    projectHandle: handle,
+    notebookStore,
+    model,
+  });
+
+  scanning = true;
+  renderApp();
+
+  // Subscribe to scanner events — when notebook is loaded, show panel.
+  // The present_notebook tool updates NotebookStore directly, so we
+  // check after tool execution completes.
+  const unsubscribe = scannerHandle.subscribe((event) => {
+    if (event.type === "tool_execution_end") {
+      if (!notebookStore.empty && !notebookVisible) {
+        notebookVisible = true;
+        renderApp();
+      }
+    }
+  });
+
+  // Run scan — fire and forget, clean up on completion
+  scannerHandle.scan(handle.name).then(() => {
+    scanning = false;
+    unsubscribe();
+    renderApp();
+  }).catch((e) => {
+    console.error("[canopy] Scanner failed:", e);
+    scanning = false;
+    unsubscribe();
+    renderApp();
+  });
 }
 
 // --- Agent lifecycle ---
@@ -294,7 +340,7 @@ async function initAgent(initialMessages?: AgentMessage[]) {
     }
     if (currentSessionId) saveSession();
 
-    // Check for notebook data in the latest messages
+    // Sync change proposals from chat agent (Phase 2 will extract this)
     syncNotebookFromMessages(messages);
 
     renderApp();
@@ -413,10 +459,13 @@ function renderApp() {
           ${showNotebook
             ? html`
                 <div class="flex flex-col border-r border-border ${mobile ? 'w-full' : hasNotebook ? 'w-1/2' : 'w-2/5'} shrink-0">
-                  <div class="px-3 py-1.5 border-b border-border/50 shrink-0">
+                  <div class="px-3 py-1.5 border-b border-border/50 shrink-0 flex items-center gap-2">
                     <span class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
                       Architecture
                     </span>
+                    ${scanning
+                      ? html`<span class="text-xs text-muted-foreground animate-pulse">Scanning...</span>`
+                      : ""}
                   </div>
                   ${renderNotebookPanel(notebookStore, renderApp)}
                 </div>
@@ -503,6 +552,8 @@ if (import.meta.env.DEV) {
     toolContext,
     renderApp,
     get agent() { return agent; },
+    get scanner() { return scannerHandle; },
+    get isScanning() { return scanning; },
     showNotebook() { notebookVisible = true; renderApp(); },
     hideNotebook() { notebookVisible = false; renderApp(); },
     setProject(handle: FileSystemDirectoryHandle) {

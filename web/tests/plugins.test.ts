@@ -173,14 +173,11 @@ describe("Architecture plugin: skills", () => {
   const registry = createRegistry();
   const ctx: PluginContext = {};
 
-  it("provides scan-architecture skill", () => {
+  it("scan-architecture skill moved to scanner agent", () => {
+    // scan-architecture is no longer a chat plugin skill — it's handled
+    // by the dedicated scanner agent (see scanner.ts)
     const skill = registry.skill("scan-architecture", ctx);
-    expect(skill).toBeDefined();
-    expect(skill!.label).toBe("Scan Architecture");
-
-    const prompt = skill!.prompt({ projectName: "canopy" });
-    expect(prompt).toContain("canopy");
-    expect(prompt).toContain("canopy-notebook");
+    expect(skill).toBeUndefined();
   });
 
   it("provides propose-changes skill", () => {
@@ -220,14 +217,13 @@ describe("Architecture plugin: skills", () => {
 describe("Architecture plugin: system prompt", () => {
   const registry = createRegistry();
 
-  it("includes scanning strategy when project is open", () => {
+  it("includes codebase context when project is open", () => {
     const ctx: PluginContext = {
       projectHandle: {} as FileSystemDirectoryHandle,
     };
     const prompt = registry.systemPrompt(ctx);
     expect(prompt).toContain("list_directory");
     expect(prompt).toContain("read_file");
-    expect(prompt).toContain("Scanning Strategy");
   });
 
   it("tells agent to ask user to open project when no project", () => {
@@ -235,10 +231,11 @@ describe("Architecture plugin: system prompt", () => {
     expect(prompt).toContain("open a project");
   });
 
-  it("includes notebook format instructions", () => {
+  it("no longer includes notebook format (moved to scanner agent)", () => {
     const prompt = registry.systemPrompt({});
-    expect(prompt).toContain("canopy-notebook");
-    expect(prompt).toContain("kebab-case");
+    // canopy-notebook format instructions are now in the scanner agent's
+    // system prompt, not the chat agent's plugin system prompt
+    expect(prompt).not.toContain("canopy-notebook");
   });
 
   it("includes change proposal format instructions", () => {
@@ -504,32 +501,21 @@ describe("Dogfood: full pipeline", () => {
     }
   });
 
-  it("skill prompt → tool calls → notebook parse is a coherent pipeline", async () => {
+  it("scanner tool + filesystem tools → notebook loaded (coherent pipeline)", async () => {
     const registry = createRegistry();
     const handle = new NodeDirectoryHandle(WEB_SRC);
     const ctx: PluginContext = {
       projectHandle: handle as unknown as FileSystemDirectoryHandle,
     };
 
-    // 1. Get the scan skill and generate the prompt
-    const scanSkill = registry.skill("scan-architecture", ctx)!;
-    const scanPrompt = scanSkill.prompt({ projectName: "canopy-web" });
-    expect(scanPrompt).toContain("canopy-web");
-
-    // 2. The system prompt is well-formed
-    const systemPrompt = registry.systemPrompt(ctx);
-    expect(systemPrompt).toContain("list_directory");
-    expect(systemPrompt).toContain("canopy-notebook");
-    expect(systemPrompt).toContain("canopy-changes");
-
-    // 3. Tools are available
+    // 1. Filesystem tools are available via plugin
     const tools = registry.resolveTools(ctx);
     expect(tools.length).toBeGreaterThanOrEqual(2);
 
-    // 4. Simulate what the agent would do: list root, read key files
     const listDir = tools.find((t) => t.name === "list_directory")!;
     const readFile = tools.find((t) => t.name === "read_file")!;
 
+    // 2. Simulate scanner agent exploring the codebase
     const rootListing = await listDir.execute("call-1", {});
     const rootText = (rootListing.content[0] as any).text as string;
     expect(rootText).toContain("main.ts");
@@ -538,10 +524,29 @@ describe("Dogfood: full pipeline", () => {
     const mainText = (mainFile.content[0] as any).text as string;
     expect(mainText).toContain("createRegistry");
 
-    // 5. After tool calls, agent would emit a notebook — verify parsing works
-    //    (already tested above, but this proves the pipeline is coherent)
+    // 3. Scanner delivers notebook via present_notebook tool (not fences)
+    const { NotebookStore } = await import("../src/notebook/store.js");
+    const { presentNotebookTool } = await import("../src/agent/tools/present-notebook.js");
+    const store = new NotebookStore();
+    const presentTool = presentNotebookTool(store);
 
-    // 6. Propose-changes skill works with real cell data
+    const result = await presentTool.execute("call-3", {
+      cells: [{
+        id: "canopy-web",
+        kind: "system",
+        name: "Canopy Web",
+        summary: "PWA for codebase architecture exploration",
+        children: [],
+        dependencies: [],
+        file_paths: [],
+      }],
+      root_ids: ["canopy-web"],
+    });
+    const text = (result.content[0] as any).text as string;
+    expect(text).toContain("1 cells");
+    expect(store.empty).toBe(false);
+
+    // 4. Propose-changes skill still works for chat agent
     const proposeSkill = registry.skill("propose-changes", ctx)!;
     const proposePrompt = proposeSkill.prompt({
       kind: "component",

@@ -23,6 +23,7 @@ import { createRegistry, type PluginContext, type PluginRegistry } from "../src/
 import { NodeDirectoryHandle } from "./node-fs-handle.js";
 import { findLatestNotebook, findLatestChanges } from "../src/notebook/parse.js";
 import { NotebookStore } from "../src/notebook/store.js";
+import { presentNotebookTool } from "../src/agent/tools/present-notebook.js";
 import type { Notebook } from "../src/notebook/types.js";
 import { startCurlProxy, type CurlProxy } from "./curl-proxy.js";
 
@@ -121,20 +122,31 @@ describe("Live agent: Canopy analyzes itself", () => {
   // =========================================================
 
   run(
-    "Phase 2: agent scans web/src/ and emits a valid canopy-notebook",
+    "Phase 2: scanner agent explores web/src/ and calls present_notebook",
     async () => {
+      // Scanner agent uses present_notebook tool instead of fence scraping.
+      // The tool loads the notebook directly into the store.
+      const store = new NotebookStore();
+      const fsTools = registry.resolveTools(ctx);
+      const notebookTool = presentNotebookTool(store);
+
+      const scannerSystemPrompt = [
+        `You are a codebase architecture scanner. Explore the project and call present_notebook with your findings.`,
+        `Use list_directory and read_file to explore. Call present_notebook exactly once when done.`,
+        `Structure cells as: system > container > component. Use kebab-case IDs.`,
+      ].join("\n");
+
       const agent = new Agent({
         initialState: {
-          systemPrompt: buildSystemPrompt(registry, ctx),
+          systemPrompt: scannerSystemPrompt,
           model,
           thinkingLevel: "off",
           messages: [],
-          tools: registry.resolveTools(ctx),
+          tools: [...fsTools, notebookTool],
         },
       });
 
-      const scanSkill = registry.skill("scan-architecture", ctx)!;
-      await agent.prompt(scanSkill.prompt({ projectName: "canopy-web" }));
+      await agent.prompt(`Analyze the architecture of this project ("canopy-web").`);
       await agent.waitForIdle();
 
       const messages = agent.state.messages;
@@ -152,37 +164,43 @@ describe("Live agent: Canopy analyzes itself", () => {
       const readFileCalls = toolCalls.filter((c: any) => c.name === "read_file");
       expect(readFileCalls.length).toBeGreaterThan(0);
 
-      // Extract and validate notebook
-      const notebook = findLatestNotebook(messages);
-      expect(notebook).not.toBeNull();
-      expect(notebook!.cells.size).toBeGreaterThanOrEqual(3);
-      expect(notebook!.root_ids.length).toBeGreaterThanOrEqual(1);
+      // Notebook was loaded via present_notebook tool, not fence scraping
+      const presentCalls = toolCalls.filter((c: any) => c.name === "present_notebook");
+      expect(presentCalls.length).toBe(1);
 
-      const store = new NotebookStore();
-      store.load(notebook!);
       expect(store.empty).toBe(false);
+      expect(store.rootIds.length).toBeGreaterThanOrEqual(1);
 
-      const root = store.cell(notebook!.root_ids[0])!;
+      const root = store.cell(store.rootIds[0])!;
       expect(root.kind).toBe("system");
       expect(root.children.length).toBeGreaterThan(0);
 
       // Every reference must resolve
-      for (const [, cell] of notebook!.cells) {
+      for (const id of store.visibleCellIds()) {
+        const cell = store.cell(id)!;
         for (const childId of cell.children) {
-          expect(notebook!.cells.has(childId)).toBe(true);
+          expect(store.cell(childId)).toBeDefined();
         }
         for (const depId of cell.dependencies) {
-          expect(notebook!.cells.has(depId)).toBe(true);
+          expect(store.cell(depId)).toBeDefined();
         }
       }
 
-      // Save for Phase 3
-      scanNotebook = notebook!;
+      // Build notebook for Phase 3
+      scanNotebook = { cells: new Map(), root_ids: store.rootIds };
+      for (const id of store.rootIds) {
+        const collectCells = (cellId: string) => {
+          const cell = store.cell(cellId)!;
+          scanNotebook.cells.set(cellId, cell);
+          for (const childId of cell.children) collectCells(childId);
+        };
+        collectCells(id);
+      }
       scanMessages = messages;
 
       // Print summary
-      console.log(`\n--- Phase 2: Scanned ${notebook!.cells.size} cells ---`);
-      for (const [, cell] of notebook!.cells) {
+      console.log(`\n--- Phase 2: Scanned ${scanNotebook.cells.size} cells ---`);
+      for (const [, cell] of scanNotebook.cells) {
         const indent = cell.kind === "system" ? "" : cell.kind === "container" ? "  " : "    ";
         console.log(`${indent}[${cell.kind}] ${cell.name}`);
       }
