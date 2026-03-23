@@ -4,3 +4,63 @@
   0% { background-color: oklch(0.8 0.15 85 / 0.3); }
   100% { background-color: transparent; }
 }
+
+/* --- Split-pane drag handle --- */
+
+.splitter {
+  width: 5px;
+  cursor: col-resize;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background 0.15s;
+  touch-action: none;
+}
+.splitter:hover,
+.splitter:active {
+  background: var(--ring);
+}
+
+/* --- Scan chip in header --- */
+
+.scan-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  padding: 1px 8px;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+}
+.scan-chip svg {
+  animation: spin 1.5s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* --- Scan overlay on chat panel --- */
+
+.scan-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 10;
+}
+.scan-overlay-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+}
+.scan-overlay-icon svg {
+  width: 24px;
+  height: 24px;
+  animation: spin 1.5s linear infinite;
+}

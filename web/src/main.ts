@@ -17,7 +17,7 @@ import type { Agent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { html, render } from "lit";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { History, Plus, Settings, PanelLeft, PanelLeftClose, FolderOpen } from "lucide";
+import { History, Plus, Settings, PanelLeft, PanelLeftClose, PanelRight, PanelRightClose, FolderOpen, LoaderCircle } from "lucide";
 import { createCanopyAgent, saveModelPreference, resolveDefaultModel } from "./agent/session.js";
 import { createRegistry, type PluginContext } from "./agent/plugins.js";
 import { createScannerAgent, type ScannerHandle } from "./agent/scanner.js";
@@ -82,7 +82,9 @@ let currentSessionId: string | undefined;
 let currentTitle = "";
 let agentUnsubscribe: (() => void) | undefined;
 let notebookVisible = false;
+let chatVisible = true;
 let scanning = false;
+let splitPercent = 50;
 let mobilePanel: "chat" | "notebook" = "chat";
 let projectName: string | undefined;
 let toolContext: PluginContext = {};
@@ -90,8 +92,33 @@ let scannerHandle: ScannerHandle | undefined;
 
 const notebookStore = new NotebookStore();
 
+const SPLIT_MIN = 20;
+const SPLIT_MAX = 80;
+
 function isMobile(): boolean {
   return window.innerWidth < 768;
+}
+
+// --- Split-pane drag ---
+
+function onSplitterPointerDown(e: PointerEvent): void {
+  e.preventDefault();
+  const container = (e.target as HTMLElement).parentElement!;
+  const rect = container.getBoundingClientRect();
+  const target = e.target as HTMLElement;
+  target.setPointerCapture(e.pointerId);
+
+  const onMove = (ev: PointerEvent) => {
+    const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+    splitPercent = Math.max(SPLIT_MIN, Math.min(SPLIT_MAX, pct));
+    renderApp();
+  };
+  const onUp = () => {
+    target.removeEventListener("pointermove", onMove);
+    target.removeEventListener("pointerup", onUp);
+  };
+  target.addEventListener("pointermove", onMove);
+  target.addEventListener("pointerup", onUp);
 }
 
 // --- Session helpers ---
@@ -373,14 +400,19 @@ function renderApp() {
   const app = document.getElementById("app");
   if (!app) return;
 
-  const hasNotebook = !notebookStore.empty;
+  const hasNotebook = !notebookStore.empty || scanning;
   const mobile = isMobile();
-  const showNotebook = notebookVisible && (!mobile || mobilePanel === "notebook");
-  const showChat = !mobile || mobilePanel === "chat";
+  const showNotebook = (notebookVisible || scanning) && (!mobile || mobilePanel === "notebook");
+  const showChat = chatVisible && (!mobile || mobilePanel === "chat");
+  const showBothPanels = showNotebook && showChat && !mobile;
   const fsSupported = isFileSystemAccessSupported();
   const displayTitle = projectName
     ? `${currentTitle || "Canopy"} — ${projectName}`
     : (currentTitle || "Canopy");
+
+  // Scan overlay: shown in chat area when scanning + no conversation yet
+  const chatEmpty = !agent || !hasConversation(agent.state.messages);
+  const showScanOverlay = scanning && chatEmpty && showChat;
 
   render(
     html`
@@ -420,25 +452,47 @@ function renderApp() {
             <span class="text-sm font-medium text-foreground truncate max-w-xs">
               ${displayTitle}
             </span>
+            ${scanning
+              ? html`<span class="scan-chip">${icon(LoaderCircle, "xs")} Scanning</span>`
+              : ""}
           </div>
           <div class="flex items-center gap-1 px-2">
-            ${hasNotebook
+            ${hasNotebook && !mobile
               ? Button({
                   variant: "ghost",
                   size: "sm",
-                  children: icon(notebookVisible ? PanelLeftClose : PanelLeft, "sm"),
+                  children: icon(notebookVisible || scanning ? PanelLeftClose : PanelLeft, "sm"),
                   onClick: () => {
-                    if (mobile) {
-                      // On mobile, toggle between panels
-                      mobilePanel = mobilePanel === "chat" ? "notebook" : "chat";
-                    } else {
-                      notebookVisible = !notebookVisible;
-                    }
+                    notebookVisible = !notebookVisible && !scanning;
+                    if (notebookVisible && !chatVisible) chatVisible = true;
                     renderApp();
                   },
-                  title: mobile
-                    ? (mobilePanel === "chat" ? "Show Notebook" : "Show Chat")
-                    : (notebookVisible ? "Hide Notebook" : "Show Notebook"),
+                  title: notebookVisible || scanning ? "Hide Notebook" : "Show Notebook",
+                })
+              : ""}
+            ${hasNotebook && mobile
+              ? Button({
+                  variant: "ghost",
+                  size: "sm",
+                  children: icon(mobilePanel === "notebook" ? PanelLeftClose : PanelLeft, "sm"),
+                  onClick: () => {
+                    mobilePanel = mobilePanel === "chat" ? "notebook" : "chat";
+                    renderApp();
+                  },
+                  title: mobilePanel === "chat" ? "Show Notebook" : "Show Chat",
+                })
+              : ""}
+            ${showNotebook && !mobile
+              ? Button({
+                  variant: "ghost",
+                  size: "sm",
+                  children: icon(chatVisible ? PanelRightClose : PanelRight, "sm"),
+                  onClick: () => {
+                    chatVisible = !chatVisible;
+                    if (!chatVisible && !notebookVisible && !scanning) notebookVisible = true;
+                    renderApp();
+                  },
+                  title: chatVisible ? "Hide Chat" : "Show Chat",
                 })
               : ""}
             <theme-toggle></theme-toggle>
@@ -458,7 +512,8 @@ function renderApp() {
           <!-- Notebook panel -->
           ${showNotebook
             ? html`
-                <div class="flex flex-col border-r border-border ${mobile ? 'w-full' : hasNotebook ? 'w-1/2' : 'w-2/5'} shrink-0">
+                <div class="flex flex-col shrink-0"
+                     style="${showBothPanels ? `width: ${splitPercent}%` : 'width: 100%'}">
                   <div class="px-3 py-1.5 border-b border-border/50 shrink-0 flex items-center gap-2">
                     <span class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
                       Architecture
@@ -472,11 +527,27 @@ function renderApp() {
               `
             : ""}
 
+          <!-- Drag handle -->
+          ${showBothPanels
+            ? html`<div class="splitter" @pointerdown=${onSplitterPointerDown}></div>`
+            : ""}
+
           <!-- Chat panel -->
           ${showChat
             ? html`
-                <div class="flex-1 min-w-0">
+                <div class="flex-1 min-w-0 relative">
                   ${chatPanel}
+                  ${showScanOverlay
+                    ? html`
+                        <div class="scan-overlay">
+                          <div class="scan-overlay-content">
+                            <span class="scan-overlay-icon">${icon(LoaderCircle, "md")}</span>
+                            <span class="text-sm font-medium">Analyzing codebase architecture</span>
+                            <span class="text-xs text-muted-foreground">The notebook panel will appear when analysis is ready</span>
+                          </div>
+                        </div>
+                      `
+                    : ""}
                 </div>
               `
             : ""}
