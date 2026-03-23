@@ -405,7 +405,8 @@ function renderApp() {
 
   const hasNotebook = !notebookStore.empty || scanning;
   const mobile = isMobile();
-  const showNotebook = (notebookVisible || scanning) && (!mobile || mobilePanel === "notebook");
+  const notebookHasContent = !notebookStore.empty;
+  const showNotebook = (notebookVisible || scanning) && notebookHasContent && (!mobile || mobilePanel === "notebook");
   const showChat = chatVisible && (!mobile || mobilePanel === "chat");
   const showBothPanels = showNotebook && showChat && !mobile;
   const fsSupported = isFileSystemAccessSupported();
