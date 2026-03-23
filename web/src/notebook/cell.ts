@@ -72,6 +72,24 @@ function renderSummary(
   const editing = store.editingCellId === cell.id;
 
   if (editing) {
+    const refocusPanel = () => {
+      requestAnimationFrame(() => {
+        const panel = document.querySelector("[data-notebook-panel]");
+        if (panel instanceof HTMLElement) panel.focus();
+      });
+    };
+    const doSave = () => {
+      const edit = store.commitEdit();
+      if (edit) markRecentlyEdited(edit.cellId);
+      onRender();
+      refocusPanel();
+    };
+    const doCancel = () => {
+      store.cancelEdit();
+      onRender();
+      refocusPanel();
+    };
+
     return html`
       <div class="space-y-1.5 pt-2">
         <textarea
@@ -85,22 +103,28 @@ function renderSummary(
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
               e.stopPropagation();
-              const edit = store.commitEdit();
-              if (edit) markRecentlyEdited(edit.cellId);
-              onRender();
+              doSave();
             } else if (e.key === "Escape") {
               e.preventDefault();
               e.stopPropagation();
-              store.cancelEdit();
-              onRender();
+              doCancel();
             }
           }}
           @click=${(e: Event) => e.stopPropagation()}
         ></textarea>
         <div class="flex items-center gap-2 text-[10px] text-muted-foreground/60">
-          <span class="font-mono">Ctrl+Enter</span> save
-          <span class="mx-1">·</span>
-          <span class="font-mono">Esc</span> cancel
+          <button
+            class="px-1.5 py-0.5 rounded bg-primary/20 hover:bg-primary/30 text-primary cursor-pointer transition-colors"
+            @click=${(e: Event) => { e.stopPropagation(); doSave(); }}
+          >
+            <span class="font-mono">⌘↵</span> save
+          </button>
+          <button
+            class="px-1.5 py-0.5 rounded bg-secondary hover:bg-secondary/80 text-muted-foreground cursor-pointer transition-colors"
+            @click=${(e: Event) => { e.stopPropagation(); doCancel(); }}
+          >
+            <span class="font-mono">esc</span> cancel
+          </button>
         </div>
       </div>
     `;

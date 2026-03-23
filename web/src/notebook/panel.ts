@@ -34,6 +34,7 @@ export function renderNotebookPanel(
     <div
       class="flex-1 overflow-y-auto p-3 space-y-1 focus:outline-none"
       tabindex="0"
+      data-notebook-panel
       @keydown=${(e: KeyboardEvent) => handleKeyboard(e, store, onRender)}
     >
       ${store.rootIds.map((rootId) => {
@@ -50,6 +51,12 @@ function handleKeyboard(
   store: NotebookStore,
   onRender: () => void,
 ): void {
+  // Never intercept keys from form elements — let them handle their own input.
+  // This guards against both active edits and race conditions where cancelEdit
+  // clears the editing flag before the event bubbles here.
+  const tag = (e.target as HTMLElement)?.tagName;
+  if (tag === "TEXTAREA" || tag === "INPUT") return;
+
   // When editing, let the textarea handle all keys
   if (store.isEditing) return;
 

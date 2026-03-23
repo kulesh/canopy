@@ -297,6 +297,30 @@ describe("Phase 3a: Cell editing", () => {
     );
   });
 
+  it("cancelEdit emits edit-cancelled event", () => {
+    const store = loadedStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.startEdit("auth-service");
+    store.cancelEdit();
+
+    const cancelEvent = listener.mock.calls.find(
+      ([e]: any) => e.type === "edit-cancelled",
+    );
+    expect(cancelEvent).toBeDefined();
+  });
+
+  it("cancelEdit is a no-op when not editing", () => {
+    const store = loadedStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.cancelEdit();
+
+    expect(listener).not.toHaveBeenCalled();
+  });
+
   it("commitEdit updates the summary and provenance", () => {
     const store = loadedStore();
     store.startEdit("auth-service");

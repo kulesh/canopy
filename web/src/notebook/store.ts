@@ -18,6 +18,7 @@ export type NotebookEvent =
   | { type: "cell-toggled"; cellId: string; expanded: boolean }
   | { type: "focus-changed"; cellId: string | null }
   | { type: "cell-edited"; edit: CellEdit }
+  | { type: "edit-cancelled" }
   | { type: "changes-loaded"; changeSet: ChangeSet }
   | { type: "changes-dismissed"; cellId: string }
   | { type: "changes-cleared" };
@@ -133,8 +134,10 @@ export class NotebookStore {
   }
 
   cancelEdit(): void {
+    if (!this.editingId) return;
     this.editingId = null;
     this.draft = "";
+    this.emit({ type: "edit-cancelled" });
   }
 
   // --- Change proposals ---
