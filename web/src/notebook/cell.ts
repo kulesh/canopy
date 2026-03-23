@@ -31,7 +31,7 @@ function kindBadge(kind: CellKind): TemplateResult {
   const label = kind === "code_unit" ? "unit" : kind;
   return html`
     <span
-      class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${KIND_COLORS[kind]}"
+      class="text-[11px] leading-none uppercase tracking-wide px-2 py-1 rounded border ${KIND_COLORS[kind]}"
     >
       ${label}
     </span>
@@ -44,7 +44,7 @@ function provenanceBadge(source: "ai" | "human"): TemplateResult {
       ? "bg-sky-500/20 text-sky-300 border-sky-500/30"
       : "bg-emerald-500/20 text-emerald-300 border-emerald-500/30";
   return html`
-    <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${cls}">
+    <span class="text-[11px] leading-none uppercase tracking-wide px-2 py-1 rounded border ${cls}">
       ${source}
     </span>
   `;
@@ -195,7 +195,7 @@ export function renderCell(
     >
       <!-- Header -->
       <button
-        class="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-secondary/50 transition-colors cursor-pointer"
+        class="w-full flex items-center gap-2 pl-3 pr-2 py-2 text-left hover:bg-secondary/50 transition-colors cursor-pointer"
         @click=${() => {
           store.focus(cell.id);
           store.toggle(cell.id);
@@ -214,7 +214,7 @@ export function renderCell(
         </span>
         <span class="flex items-center gap-1.5 ml-auto shrink-0">
           ${change
-            ? html`<span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border bg-amber-500/20 text-amber-300 border-amber-500/30">
+            ? html`<span class="text-[11px] leading-none uppercase tracking-wide px-2 py-1 rounded border bg-amber-500/20 text-amber-300 border-amber-500/30">
                 changes
               </span>`
             : ""}
@@ -222,7 +222,7 @@ export function renderCell(
           ${kindBadge(cell.kind)}
           ${depCount > 0
             ? html`<span
-                class="text-[10px] text-muted-foreground px-1.5 py-0.5 rounded border border-border"
+                class="text-[11px] leading-none text-muted-foreground px-2 py-1 rounded border border-border"
               >
                 ${depCount}→
               </span>`
